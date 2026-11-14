@@ -45,18 +45,18 @@ public class TvInterfaceTest {
   }
 
   @Test
-  public void backReturnsFocusToCardsSetting() {
+  public void backReturnsFocusToRowsSetting() {
     MainActivity activity = create();
     activity.settings();
     TvSettingsPanel panel = (TvSettingsPanel) ShadowDialog.getLatestDialog();
     View root = panel.findViewById(android.R.id.content);
     View home = root.findViewWithTag("root.home");
     assertTrue(home.performClick());
-    View cards = panel.getWindow().getDecorView().findViewWithTag("appearance.cards");
+    View cards = panel.getWindow().getDecorView().findViewWithTag("home.rows");
     assertTrue(cards.requestFocus());
     assertTrue(cards.performClick());
     panel.onBackPressed();
-    assertEquals("appearance.cards", panel.getCurrentFocus().getTag());
+    assertEquals("home.rows", panel.getCurrentFocus().getTag());
     panel.onBackPressed();
     assertEquals("root.home", panel.getCurrentFocus().getTag());
     assertSame(root, panel.findViewById(android.R.id.content));
@@ -592,6 +592,8 @@ public class TvInterfaceTest {
   @Test
   public void manyApplicationsUseMultipleRemoteNavigableRows() {
     MainActivity a = create(15);
+    a.getPreferences(0).edit().putInt("row:tv:card_width", 240).apply();
+    a.home();
     View first = a.getWindow().getDecorView().findViewWithTag("app_order:test.tv.app0"),
         last = a.getWindow().getDecorView().findViewWithTag("app_order:test.tv.app8");
     assertNotNull(first);
