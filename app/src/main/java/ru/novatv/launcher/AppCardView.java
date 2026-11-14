@@ -33,8 +33,16 @@ final class AppCardView extends FrameLayout {
     addView(contents, new LayoutParams(-1, -1));
   }
 
+  void setCardColor(int color) {
+    contents.setBackground(host.shape(color, radius));
+  }
+
   void showFocus(boolean focused, boolean zoom, int color) {
-    float scale = focused && zoom ? 1.06f : 1f;
+    showFocus(focused, zoom ? 1.06f : 1f, color);
+  }
+
+  void showFocus(boolean focused, float zoom, int color) {
+    float scale = focused ? zoom : 1f;
     setScaleX(scale);
     setScaleY(scale);
     // Keep the focused card above its neighbours without drawing a dynamic elevation shadow.
@@ -50,26 +58,12 @@ final class AppCardView extends FrameLayout {
     }
   }
 
-  void addArtwork(Drawable artwork, int height, boolean banner, boolean mobile) {
-    android.content.SharedPreferences prefs = host.getPreferences(0);
+  void addArtwork(Drawable artwork, int height, boolean banner) {
     FrameLayout box = new FrameLayout(host);
-    if (mobile) {
-      box.setBackgroundColor(prefs.getInt("mobile_card_color", 0x00000000));
-      int padding = host.dp(prefs.getInt("mobile_icon_padding", 4));
-      box.setPadding(padding, padding, padding, padding);
-    }
     ImageView image = new ImageView(host);
     image.setImageDrawable(artwork);
-    int mode = prefs.getInt("mobile_icon_mode", 0);
-    image.setScaleType(banner || (mobile && mode == 0)
-        ? ImageView.ScaleType.CENTER_CROP
-        : mobile && mode == 2 ? ImageView.ScaleType.CENTER : ImageView.ScaleType.FIT_CENTER);
-    int size = banner || mobile ? -1 : host.dp(Math.min(height, prefs.getInt("icon_size", 44)));
-    if (mobile) {
-      float scale = prefs.getInt("mobile_icon_scale", 100) / 100f;
-      image.setScaleX(scale);
-      image.setScaleY(scale);
-    }
+    image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+    int size = banner ? -1 : host.dp(Math.max(1, Math.min(height - 6, Math.round(height * .68f))));
     box.addView(image, new LayoutParams(size, size, Gravity.CENTER));
     contents.addView(box, host.lp(-1, height));
   }

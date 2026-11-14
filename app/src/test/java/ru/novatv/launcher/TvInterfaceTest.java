@@ -299,7 +299,7 @@ public class TvInterfaceTest {
     ViewGroup controls = root.findViewWithTag("header.controls");
     ViewGroup information = root.findViewWithTag("header.information");
     String[] controlsOrder = {"header.apps", "header.search", "header.settings",
-        "header.timer", "header.network", "header.notifications"};
+        "header.timer", "header.network", "header.notifications", "header.bluetooth"};
     for (int i = 0; i < controlsOrder.length; i++)
       assertEquals(controlsOrder[i], controls.getChildAt(i).getTag());
     String[] informationOrder = {"header.weather", "header.date", "header.clock"};
@@ -438,6 +438,47 @@ public class TvInterfaceTest {
   }
 
   @Test
+  public void resizingTvCardsKeepsFavoriteRowAndHeaderInstances() {
+    MainActivity activity = create();
+    activity.getPreferences(0).edit().putString("favorite_order", "test.tv.app0").apply();
+    activity.home();
+    View root = activity.findViewById(android.R.id.content);
+    View favorites = root.findViewWithTag("home.row:favorites");
+    View television = root.findViewWithTag("home.row:tv");
+    View header = root.findViewWithTag("header.controls");
+    assertNotNull(favorites);
+    assertNotNull(television);
+    activity.settings();
+    TvSettingsPanel panel = (TvSettingsPanel) ShadowDialog.getLatestDialog();
+    panel.open(activity::rowsSettings);
+    View settingsRoot = panel.findViewById(android.R.id.content);
+    settingsRoot.findViewWithTag("tv").performClick();
+    SeekBar size = settingsRoot.findViewWithTag("slider:Размер карточки");
+    size.setProgress(size.getProgress() + 1);
+    assertSame(favorites, root.findViewWithTag("home.row:favorites"));
+    assertSame(header, root.findViewWithTag("header.controls"));
+    assertNotSame(television, root.findViewWithTag("home.row:tv"));
+    assertEquals(100, activity.getPreferences(0).getInt("row:tv:card_width", 0));
+    panel.dismiss();
+    activity.finish();
+  }
+
+  @Test
+  public void wholeHeaderDisappearsAndControlOrderSurvivesToggle() {
+    MainActivity activity = create();
+    View root = activity.findViewById(android.R.id.content);
+    activity.getPreferences(0).edit().putString("status_controls_order", "bluetooth|search").apply();
+    activity.setBool("show_status", false);
+    assertNull(root.findViewWithTag("header.apps"));
+    assertNull(root.findViewWithTag("header.information"));
+    activity.setBool("show_status", true);
+    ViewGroup controls = root.findViewWithTag("header.controls");
+    assertEquals("header.bluetooth", controls.getChildAt(0).getTag());
+    assertEquals("header.search", controls.getChildAt(1).getTag());
+    activity.finish();
+  }
+
+  @Test
   public void settingsOpenAndNestedPageBackKeepsPanelOpen() throws Exception {
     MainActivity a = create();
     a.settings();
@@ -445,7 +486,7 @@ public class TvInterfaceTest {
     Dialog panel = ShadowDialog.getLatestDialog();
     assertTrue(panel instanceof TvSettingsPanel);
     TvSettingsPanel settings = (TvSettingsPanel) panel;
-    settings.open(a::cardsSettings);
+    settings.open(a::rowsSettings);
     assertTrue(settings.isShowing());
     save(a, settings, "settings-cards.png");
     settings.onBackPressed();

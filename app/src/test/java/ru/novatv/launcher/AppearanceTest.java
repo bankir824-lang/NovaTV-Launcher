@@ -20,7 +20,7 @@ public class AppearanceTest {
   @Test
   public void storedOutOfRangeWidthsCannotCreateHugeCards() {
     assertEquals(Appearance.cardHeight(240, 0, true), Appearance.cardHeight(10000, 0, true));
-    assertEquals(Appearance.cardHeight(80, 0, true), Appearance.cardHeight(-10, 0, true));
+    assertEquals(Appearance.cardHeight(60, 0, true), Appearance.cardHeight(-10, 0, true));
   }
 
   @Test

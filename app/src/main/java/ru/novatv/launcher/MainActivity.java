@@ -12,7 +12,7 @@ import java.text.*;
 import java.util.*;
 
 public class MainActivity extends Activity {
-  private LinearLayout page, content, menu;
+  private LinearLayout page, content;
   private TextView clock, notificationCounter;
   private boolean resumed;
   private final Runnable redraw =
@@ -22,7 +22,14 @@ public class MainActivity extends Activity {
   private final Set<String> pendingAppearance = new HashSet<>();
   private final Map<String, View> launcherRows = new LinkedHashMap<>();
   private final Map<String, LinearLayout> homeRowViews = new LinkedHashMap<>();
-  private View channelStatus;
+  private View headerGap;
+  private android.media.tv.TvInputManager inputManager;
+  private final android.media.tv.TvInputManager.TvInputCallback inputChanges =
+      new android.media.tv.TvInputManager.TvInputCallback() {
+        @Override public void onInputAdded(String id) { refreshRow("inputs"); }
+        @Override public void onInputRemoved(String id) { refreshRow("inputs"); }
+        @Override public void onInputStateChanged(String id, int state) { refreshRow("inputs"); }
+      };
   private View focusedAppRow;
   private String pendingFocusTag;
   private final Runnable saveCardFocus = () -> {
@@ -76,7 +83,6 @@ public class MainActivity extends Activity {
   private long nextDailyPhotoAttempt;
   private long nextDailyPhotoCheck;
   private android.media.MediaPlayer wallpaperPlayer;
-  private LinearLayout statusBar;
   private TvSettingsPanel settingsPanel;
   private boolean settingsOpen;
   private int activeRows;
@@ -247,6 +253,8 @@ public class MainActivity extends Activity {
     registerReceiver(packages, filter);
     refreshApps();
     render();
+    inputManager = (android.media.tv.TvInputManager) getSystemService(TV_INPUT_SERVICE);
+    if (inputManager != null) inputManager.registerCallback(inputChanges, handler);
     handler.post(ticker);
     if (b != null && b.getBoolean("settings_open", false)) handler.post(this::settings);
     if (b == null) {
@@ -314,9 +322,11 @@ public class MainActivity extends Activity {
     updateNightShade();
     setContentView(launcherView);
     page = vertical();
-    applyLauncherPadding();
     sc.addView(page);
     header();
+    headerGap = new View(this);
+    page.addView(headerGap, lp(-1, 0));
+    applyLauncherPadding();
     gap(page, 6);
     if (getPreferences(0).getBoolean("show_banner", false)) banner();
     gap(page, 14);
@@ -577,21 +587,72 @@ public class MainActivity extends Activity {
   }
 
   private void applyLauncherPadding() {
-    page.setPadding(
-        dp(getPreferences(0).getInt("margin_left", 28)),
-        dp(getPreferences(0).getInt("margin_top", 20)),
-        dp(getPreferences(0).getInt("margin_right", 28)),
-        dp(24));
+    boolean shown = launcherHeader != null && launcherHeader.getVisibility() == View.VISIBLE;
+    int top = dp(getPreferences(0).getInt("margin_top", 20));
+    page.setPadding(dp(getPreferences(0).getInt("margin_left", 28)), shown ? 0 : top,
+        dp(getPreferences(0).getInt("margin_right", 28)), dp(24));
+    if (headerGap != null && headerGap.getParent() == page) {
+      android.view.ViewGroup.LayoutParams params = headerGap.getLayoutParams();
+      params.height = shown ? top : 0;
+      headerGap.setLayoutParams(params);
+    }
   }
 
   int accent() {
     return getPreferences(0).getInt("accent_color", 0xffff94b2);
   }
 
+  private static final String CONTROL_ORDER = "status_controls_order";
+  private static final String INFORMATION_ORDER = "status_information_order";
+
+  private enum HeaderItem {
+    APPS("apps_button", "apps", "Приложения", "▦", R.drawable.nova_apps),
+    SEARCH("search_button", "search", "Поиск", "search", R.drawable.nova_ui_search),
+    SETTINGS("settings_button", "settings", "Настройки", "⚙", R.drawable.nova_ui_settings),
+    TIMER("timer_button", "timer", "Таймер сна", "sleep_timer", R.drawable.nova_ui_sleep_timer),
+    NETWORK("network", "network", "Сеть", "◉", R.drawable.nova_wifi),
+    NOTIFICATIONS("notifications", "notifications", "Уведомления", "♧", R.drawable.nova_bell),
+    BLUETOOTH("bluetooth", "bluetooth", "Bluetooth", "ᛒ", R.drawable.nova_bluetooth),
+    WEATHER("weather", "weather", "Погода", "☁", R.drawable.nova_weather),
+    DATE("date", "date", "Дата", "calendar", R.drawable.nova_ui_calendar),
+    CLOCK("clock", "clock", "Часы", "◷", R.drawable.nova_clock);
+
+    final String setting, key, title, icon;
+    final int drawable;
+
+    HeaderItem(String setting, String key, String title, String icon, int drawable) {
+      this.setting = setting;
+      this.key = key;
+      this.title = title;
+      this.icon = icon;
+      this.drawable = drawable;
+    }
+  }
+
+  private List<HeaderItem> headerItems(boolean controls) {
+    Map<String, HeaderItem> items = new LinkedHashMap<>();
+    for (HeaderItem item : HeaderItem.values())
+      if ((item.ordinal() < HeaderItem.WEATHER.ordinal()) == controls) items.put(item.key, item);
+    List<HeaderItem> ordered = new ArrayList<>();
+    for (String key : orderedKeys(controls ? CONTROL_ORDER : INFORMATION_ORDER, items.keySet()))
+      ordered.add(items.get(key));
+    return ordered;
+  }
+
+  private int buttonMode(String setting) {
+    return getPreferences(0).getInt(setting + "_mode",
+        getPreferences(0).getInt("status_label_mode", 2));
+  }
+
   void header() {
     LinearLayout bar = horizontal();
     launcherHeader = bar;
     page.addView(bar, 0, lp(-1, 38));
+    notificationCounter = weather = date = clock = null;
+    if (!getPreferences(0).getBoolean("show_status", true)) {
+      bar.setVisibility(View.GONE);
+      return;
+    }
     TextView logo = label("Nova home Launcher", 22, WHITE);
     logo.setTypeface(null, Typeface.BOLD);
     logo.setSingleLine(true);
@@ -600,77 +661,88 @@ public class MainActivity extends Activity {
     LinearLayout blocks = horizontal();
     blocks.setGravity(Gravity.CENTER_VERTICAL);
     bar.addView(blocks);
-    StatusBarView controls = new StatusBarView(this);
-    controls.setTag("header.controls");
-    StatusBarView status = new StatusBarView(this);
-    status.setTag("header.information");
-    statusBar = status;
-    for (String key : orderedKeys(STATUS_BLOCK_ORDER, Arrays.asList(CONTROLS_BLOCK, CLOCK_BLOCK))) {
-      LinearLayout.LayoutParams bounds = lp(-2, 38);
-      if (blocks.getChildCount() != 0) bounds.setMarginStart(dp(8));
-      blocks.addView(CONTROLS_BLOCK.equals(key) ? controls : status, bounds);
-    }
-    menu = controls;
-    if (getPreferences(0).getBoolean("show_apps_button", true))
-      nav("Приложения", "apps_button", R.drawable.nova_apps, this::openLibrary).setTag("header.apps");
-    if (getPreferences(0).getBoolean("show_search_button", true))
-      nav("Поиск", "search_button", R.drawable.nova_ui_search, this::searchApps).setTag("header.search");
-    if (getPreferences(0).getBoolean("show_settings_button", true)) {
-      TextView settingsButton = nav("Настройки", "settings_button", R.drawable.nova_ui_settings,
-          this::settings);
-      settingsButton.setTag("header.settings");
-      settingsButton.setContentDescription("Настройки Nova. Удерживайте OK для настроек Android");
-      settingsButton.setOnLongClickListener(v -> {
-        safeStart(new Intent(android.provider.Settings.ACTION_SETTINGS));
-        return true;
-      });
-      RemoteOkHandler.bind(settingsButton);
-    }
-    if (getPreferences(0).getBoolean("show_timer_button", true)) {
-      nav("Таймер сна", "timer_button", R.drawable.nova_ui_sleep_timer,
-          () -> openPanelPage(this::sleepTimerSettings)).setTag("header.timer");
-    }
-    notificationCounter = null;
-    boolean showStatus = getPreferences(0).getBoolean("show_status", true);
-    if (showStatus && getPreferences(0).getBoolean("show_network", true)) {
-      String network = networkStatus();
-      int icon = "Ethernet".equals(network) ? R.drawable.nova_ethernet
-          : "Нет сети".equals(network) ? R.drawable.nova_offline : R.drawable.nova_wifi;
-      TextView connection = controls.item(network, "Сеть: " + network, icon, false);
-      statusAction(connection, "header.network", this::openNetworkSettings);
-    }
-    if (showStatus && getPreferences(0).getBoolean("show_notifications", true)) {
-      notificationCounter = controls.item("", "Уведомления", R.drawable.nova_bell, true);
-      statusAction(notificationCounter, "header.notifications", () -> openPanelPage(this::notificationSettings));
-    }
-    weather = getPreferences(0).getBoolean("show_weather", true)
-        ? status.item(cachedWeather(), "Погода", R.drawable.nova_weather, true) : null;
-    if (weather != null) weather.setTag("header.weather");
-    styleStatusText(weather, "weather", 13, true);
     String clockFormat = getPreferences(0).getString("clock_format", "HH:mm");
     clockFormatter = "system".equals(clockFormat)
         ? android.text.format.DateFormat.getTimeFormat(this)
         : new SimpleDateFormat("hh:mm a".equals(clockFormat) ? "hh:mm a" : "HH:mm", RUSSIAN);
     dateFormatter = new SimpleDateFormat(
         getPreferences(0).getInt("date_format", 0) == 1 ? "EEE, d MMM" : "d MMM", RUSSIAN);
-    date = getPreferences(0).getBoolean("show_date", true)
-        ? status.item("", "Дата", R.drawable.nova_ui_calendar, true) : null;
-    if (date != null) date.setTag("header.date");
-    styleStatusText(date, "date", 15, false);
-    clock = getPreferences(0).getBoolean("show_clock", true)
-        ? status.item("", "Время", R.drawable.nova_clock, true) : null;
-    if (clock != null) clock.setTag("header.clock");
-    styleStatusText(clock, "clock", 17, true);
-    controls.setVisibility(controls.getChildCount() == 0 ? View.GONE : View.VISIBLE);
-    status.setVisibility(showStatus && status.getChildCount() != 0 ? View.VISIBLE : View.GONE);
+    for (String key : orderedKeys(STATUS_BLOCK_ORDER, Arrays.asList(CONTROLS_BLOCK, CLOCK_BLOCK))) {
+      boolean controls = CONTROLS_BLOCK.equals(key);
+      if (!getPreferences(0).getBoolean(controls ? "show_controls" : "show_information", true)) continue;
+      StatusBarView block = new StatusBarView(this);
+      block.setTag(controls ? "header.controls" : "header.information");
+      for (HeaderItem item : headerItems(controls))
+        if (getPreferences(0).getBoolean("show_" + item.setting, true)) addHeaderItem(block, item);
+      if (block.getChildCount() == 0) continue;
+      LinearLayout.LayoutParams bounds = lp(-2, 38);
+      if (blocks.getChildCount() != 0) bounds.setMarginStart(dp(8));
+      blocks.addView(block, bounds);
+    }
+    if (blocks.getChildCount() == 0) bar.setVisibility(View.GONE);
     updateClock();
   }
 
-  private void statusAction(TextView view, String key, Runnable action) {
-    view.setTag(key);
-    view.setFocusable(true);
-    view.setBackground(NovaUi.interaction(this, accent()));
-    view.setOnClickListener(v -> action.run());
+  private void addHeaderItem(StatusBarView block, HeaderItem item) {
+    String text = item.title;
+    int icon = item.drawable;
+    Runnable action = null;
+    switch (item) {
+      case APPS: action = this::openLibrary; break;
+      case SEARCH: action = this::voiceSearch; break;
+      case SETTINGS: action = this::settings; break;
+      case TIMER: action = () -> openPanelPage(this::sleepTimerSettings); break;
+      case NETWORK:
+        text = networkStatus();
+        if ("Ethernet".equals(text)) icon = R.drawable.nova_ethernet;
+        else if ("Нет сети".equals(text)) icon = R.drawable.nova_offline;
+        action = this::openNetworkSettings;
+        break;
+      case BLUETOOTH: action = this::openBluetooth; break;
+      case NOTIFICATIONS: action = () -> openPanelPage(this::notificationSettings); break;
+      case WEATHER: text = cachedWeather(); break;
+      case DATE:
+      case CLOCK: text = ""; break;
+    }
+    TextView button = block.item(text, item.title, icon, item.setting);
+    button.setTag("header." + item.key);
+    if (action != null) {
+      Runnable activate = action;
+      button.setFocusable(true);
+      button.setOnClickListener(v -> activate.run());
+      button.setOnFocusChangeListener((v, focused) -> block.style(button, item.setting, focused));
+    }
+    if (item == HeaderItem.SETTINGS) {
+      button.setContentDescription("Настройки Nova. Удерживайте OK для настроек Android");
+      button.setOnLongClickListener(v -> {
+        safeStart(new Intent(android.provider.Settings.ACTION_SETTINGS));
+        return true;
+      });
+      RemoteOkHandler.bind(button);
+    }
+    if (item == HeaderItem.NOTIFICATIONS) notificationCounter = button;
+    if (item == HeaderItem.WEATHER) weather = button;
+    if (item == HeaderItem.DATE) date = button;
+    if (item == HeaderItem.CLOCK) clock = button;
+  }
+
+  private void openBluetooth() {
+    if (tryStart(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))) return;
+    if (tryStart(new Intent("android.settings.BLUETOOTH_PAIRING_SETTINGS"))) return;
+    if (tryStart(new Intent(android.provider.Settings.ACTION_SETTINGS))) {
+      Toast.makeText(this, "Откройте «Пульты и аксессуары» в настройках Android", Toast.LENGTH_LONG).show();
+    } else {
+      Toast.makeText(this, "Телевизор не открыл настройки Bluetooth", Toast.LENGTH_LONG).show();
+    }
+  }
+
+  private boolean tryStart(Intent intent) {
+    try {
+      startActivity(intent);
+      return true;
+    } catch (ActivityNotFoundException | SecurityException unavailable) {
+      return false;
+    }
   }
 
   private void openNetworkSettings() {
@@ -700,8 +772,8 @@ public class MainActivity extends Activity {
       boolean granted = notificationGranted();
       int count = granted ? visibleNotifications().size() : 0;
       String value = granted ? String.valueOf(count) : "—";
-      setChangedText(notificationCounter, getPreferences(0).getInt("status_label_mode", 2) == 1
-          ? "Уведомления " + value : value);
+      setChangedText(notificationCounter, buttonMode("notifications") == 0 ? ""
+          : buttonMode("notifications") == 1 ? "Уведомления " + value : value);
       notificationCounter.setContentDescription(
           granted ? "Уведомления: " + count : "Уведомления: предоставить доступ");
       notificationCounter.setVisibility(
@@ -711,12 +783,13 @@ public class MainActivity extends Activity {
     }
     if (weather != null) loadWeather();
     Date now = new Date();
-    if (date != null) setChangedText(date, dateFormatter.format(now));
-    if (clock != null) setChangedText(clock, clockFormatter.format(now));
+    if (date != null) setChangedText(date, buttonMode("date") == 0 ? "" : dateFormatter.format(now));
+    if (clock != null) setChangedText(clock, buttonMode("clock") == 0 ? "" : clockFormatter.format(now));
   }
 
   @Override
   protected void onDestroy() {
+    if (inputManager != null) inputManager.unregisterCallback(inputChanges);
     if (settingsPanel != null) settingsPanel.dismiss();
     handler.removeCallbacksAndMessages(null);
     if (frameSample.isRunning()) frameSample.stop();
@@ -812,50 +885,6 @@ public class MainActivity extends Activity {
     if (!android.text.TextUtils.equals(view.getText(), text)) view.setText(text);
   }
 
-  private void styleStatusText(TextView view, String key, int size, boolean shadow) {
-    if (view == null) return;
-    view.setTextSize(getPreferences(0).getInt(key + "_size", size));
-    int color = getPreferences(0).getInt(key + "_color",
-        getPreferences(0).getInt("status_color", WHITE));
-    view.setTextColor(color);
-    view.setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(color));
-    view.setShadowLayer(getPreferences(0).getBoolean(key + "_shadow", shadow) ? dp(2) : 0,
-        0, dp(1), Color.BLACK);
-  }
-
-  TextView nav(String s, String key, int icon, Runnable r) {
-    int mode = getPreferences(0).getInt(key + "_mode",
-        getPreferences(0).getInt("status_label_mode", 2));
-    TextView t = label(mode == 0 ? "" : s, 14, WHITE);
-    t.setSingleLine(true);
-    styleStatusText(t, key, 14, false);
-    t.setContentDescription(s);
-    if (mode != 1) {
-      Drawable image = getDrawable(icon).mutate();
-      image.setBounds(0, 0, dp(18), dp(18));
-      t.setCompoundDrawablesRelative(image, null, null, null);
-      t.setCompoundDrawablePadding(dp(5));
-      t.setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(t.getCurrentTextColor()));
-    }
-    t.setGravity(Gravity.CENTER);
-    t.setPadding(dp(10), 0, dp(10), 0);
-    t.setBackground(shape(0x99172131, 14));
-    t.setFocusable(true);
-    t.setOnClickListener(v -> r.run());
-    t.setOnFocusChangeListener(
-        (v, f) -> {
-          t.setBackground(shape(f ? 0xffd9eaff : 0x99172131, 14));
-          if (f) {
-            t.setTextColor(0xff10182a);
-            t.setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(0xff10182a));
-          } else styleStatusText(t, key, 14, false);
-        });
-    LinearLayout.LayoutParams bounds = lp(-2, 38);
-    if (menu.getChildCount() != 0) bounds.setMarginStart(dp(getPreferences(0).getInt("status_gap", 8)));
-    menu.addView(t, bounds);
-    return t;
-  }
-
   void banner() {
     LinearLayout b = vertical();
     b.setPadding(dp(30), dp(20), dp(25), dp(22));
@@ -880,7 +909,6 @@ public class MainActivity extends Activity {
   void clear(String title) {
     content.removeAllViews();
     homeRowViews.clear();
-    channelStatus = null;
     focusedAppRow = null;
     fullRows.clear();
     artworkViews.clear();
@@ -909,18 +937,7 @@ public class MainActivity extends Activity {
   }
 
   private void updateChannelStatus() {
-    if (channelStatus != null) content.removeView(channelStatus);
-    channelStatus = null;
-    if (getPreferences(0).getBoolean("show_channels", false)) {
-      if (feeds == null) {
-        channelStatus = label("Загрузка рекомендаций…", 13, MUTED);
-        loadChannels();
-      } else {
-        if (System.currentTimeMillis() - feedsLoaded > 300000) loadChannels();
-        if (feeds.channels.isEmpty()) channelStatus = label(feeds.message, 13, MUTED);
-      }
-      if (channelStatus != null) content.addView(channelStatus);
-    }
+    if (feeds == null || System.currentTimeMillis() - feedsLoaded > 300000) loadChannels();
   }
 
   private static final class HomeRow {
@@ -975,15 +992,14 @@ public class MainActivity extends Activity {
     Map<String, HomeRow> rows = new LinkedHashMap<>();
     rows.put("favorites", new HomeRow("Избранное", "☆",
         () -> renderAppRow("☆", "Избранное", "favorite_order", getFavorites(), "show_favorites"),
-        p -> rowVisibility(p, "Избранное", "☆", "show_favorites", true)));
+        p -> rowSettings(p, "favorites", "Избранное", "☆", "show_favorites", true)));
     rows.put("tv", new HomeRow("ТВ-приложения", "▤",
         () -> renderAppRow("▣", "ТВ-приложения", "app_order", appsByType(true), "show_all"),
-        p -> rowVisibility(p, "ТВ-приложения", "▤", "show_all", true)));
+        p -> rowSettings(p, "tv", "ТВ-приложения", "▤", "show_all", true)));
     rows.put("mobile", new HomeRow("Мобильные приложения", "▯",
         () -> {
-          if (getPreferences(0).getBoolean("show_all", true))
-            renderAppRow("▯", "Мобильные приложения", "mobile_order", appsByType(false), "show_mobile");
-        }, p -> rowVisibility(p, "Мобильные приложения", "▯", "show_mobile", true)));
+          renderAppRow("▯", "Мобильные приложения", "mobile_order", appsByType(false), "show_mobile");
+        }, p -> rowSettings(p, "mobile", "Мобильные приложения", "▯", "show_mobile", true)));
     for (String category : readIds("categories")) {
       rows.put("category:" + category, new HomeRow(category, "folder", () -> {
         if (readIds("hidden_categories").contains(category)) return;
@@ -994,24 +1010,44 @@ public class MainActivity extends Activity {
         if (!visibleApps(apps, false).isEmpty()) rowApps(apps, false, "category_order_" + category);
       }, p -> categoryRowSettings(p, category)));
     }
-    rows.put("inputs", new HomeRow("Источники сигнала", "⇥", () -> {
-      if (!getPreferences(0).getBoolean("show_inputs", false) || availableTvInputs().isEmpty()) return;
-      rowTitle("⇥", "Источники сигнала");
-      LinearLayout inputs = horizontal();
-      content.addView(inputs);
-      action(inputs, "Выбрать вход телевизора", this::showInputs);
-    }, p -> rowVisibility(p, "Источники сигнала", "⇥", "show_inputs", false)));
-    if (feeds != null) for (TvFeeds.Channel channel : feeds.channels) {
-      rows.put("channel:" + channel.id, new HomeRow(channel.title, "▤", () -> {
-        if (getPreferences(0).getBoolean("show_channels", false)
-            && !readIds("hidden_channels").contains(channel.id)) renderChannel(channel);
-      }, p -> {
-        p.title("▤", channel.title, channel.source);
-        p.toggle("eye", "Показывать ряд", "", !readIds("hidden_channels").contains(channel.id),
-            value -> setRowVisibility("hidden_channels", channel.id, value));
-      }));
+    rows.put("inputs", new HomeRow("Источники сигнала", "⇥", this::renderInputs,
+        p -> rowSettings(p, "inputs", "Источники сигнала", "⇥", "show_inputs", false)));
+    rows.put("watch_next", new HomeRow("Смотреть далее", "▤", () -> {
+      if (feeds == null || !getPreferences(0).getBoolean("show_watch_next",
+          getPreferences(0).getBoolean("show_channels", false))) return;
+      for (TvFeeds.Channel channel : feeds.channels)
+        if ("watch_next".equals(channel.id)) renderChannel(channel, "watch_next");
+    }, p -> rowSettings(p, "watch_next", "Смотреть далее", "▤", "show_watch_next",
+        getPreferences(0).getBoolean("show_channels", false))));
+    for (Map.Entry<String, List<TvFeeds.Channel>> entry : recommendationGroups().entrySet()) {
+      String key = entry.getKey();
+      List<TvFeeds.Channel> channels = entry.getValue();
+      String title = channels.get(0).source;
+      rows.put(key, new HomeRow(title, "▤", () -> {
+        List<String> hidden = readIds("hidden_channels");
+        if (recommendationsEnabled(key))
+          for (TvFeeds.Channel channel : channels)
+            if (!hidden.contains(channel.id)) renderChannel(channel, key);
+      }, p -> recommendationSettings(p, key, title, channels)));
     }
     return rows;
+  }
+
+  private boolean recommendationsEnabled(String key) {
+    return getPreferences(0).getBoolean("visible:" + key,
+        getPreferences(0).getBoolean("show_channels", false));
+  }
+
+  private Map<String, List<TvFeeds.Channel>> recommendationGroups() {
+    Map<String, List<TvFeeds.Channel>> groups = new LinkedHashMap<>();
+    if (feeds != null) for (TvFeeds.Channel channel : feeds.channels) {
+      if (!"watch_next".equals(channel.id)) {
+        String key = "recommendations:" + (channel.pkg == null || channel.pkg.isEmpty()
+            ? channel.id : channel.pkg);
+        groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(channel);
+      }
+    }
+    return groups;
   }
 
   private List<App> appsByType(boolean tv) {
@@ -1042,7 +1078,9 @@ public class MainActivity extends Activity {
   }
 
   void rowTitle(String icon, String title) {
-    gap(content, getPreferences(0).getInt("row_gap", 12));
+    View spacer = new View(this);
+    spacer.setTag("row.gap");
+    content.addView(spacer, lp(1, getPreferences(0).getInt("row_gap", 12)));
     TextView heading = label("", 17, WHITE);
     heading.setTag(new RowHeading(icon, title));
     heading.setPadding(0, 0, 0, dp(6));
@@ -1119,7 +1157,7 @@ public class MainActivity extends Activity {
     if (ids.contains(a.pkg)) ids.remove(a.pkg);
     else ids.add(a.pkg);
     saveFavorites(ids);
-    if (content != null) home();
+    refreshRow("favorites");
   }
 
   void action(LinearLayout parent, String s, Runnable r) {
@@ -1160,7 +1198,8 @@ public class MainActivity extends Activity {
   void rowApps(List<App> input, boolean favoritesRow, String rowKey) {
     fullRows.put(rowKey, new ArrayList<>(input));
     List<App> list = new ArrayList<>();
-    for (App app : input) if (showHidden || !readIds("hidden").contains(app.pkg)) list.add(app);
+    Set<String> hidden = new HashSet<>(readIds("hidden"));
+    for (App app : input) if (showHidden || !hidden.contains(app.pkg)) list.add(app);
     if (!rowKey.equals("app_order") && !rowKey.equals("favorite_order")) {
       List<String> order = readIds(rowKey);
       list.sort(
@@ -1171,16 +1210,17 @@ public class MainActivity extends Activity {
     }
     HorizontalScrollView scroll = new HorizontalScrollView(this);
     launcherRows.put(rowKey, scroll);
+    scroll.setTag(rowKey);
     scroll.setClipToPadding(false);
     scroll.setHorizontalScrollBarEnabled(false);
-    int width = Appearance.clamp(getPreferences(0).getInt("card_width", 126), 80, 240);
-    boolean titles = getPreferences(0).getBoolean("card_titles", false);
-    int ratio =
-        getPreferences(0)
-            .getInt(
-                rowKey.equals("mobile_order") ? "mobile_ratio" : "card_ratio",
-                rowKey.equals("mobile_order") ? 1 : 0);
-    int height = Appearance.cardHeight(width, ratio, titles);
+    String style = "favorite_order".equals(rowKey) ? "favorites"
+        : "mobile_order".equals(rowKey) ? "mobile"
+        : rowKey.startsWith("category_order_") ? "category:" + rowKey.substring(15) : "tv";
+    int width = cardWidth(style);
+    int titleMode = titleMode(style);
+    int ratio = rowValue(style, "card_ratio", "mobile".equals(style) ? 1 : 0);
+    int height = Appearance.tileHeight(width, ratio);
+    int zoom = rowValue(style, "zoom_dp", 6);
     int availableDp =
         (int)
                 (getResources().getDisplayMetrics().widthPixels
@@ -1190,12 +1230,14 @@ public class MainActivity extends Activity {
     final int columns =
         Math.max(1, availableDp / (width + getPreferences(0).getInt("card_gap", 10)));
     final int maxRows =
-        favoritesRow ? 1 : Appearance.clamp(getPreferences(0).getInt("grid_rows", 3), 1, 3);
+        Appearance.clamp(rowValue(style, "grid_rows", 3), 1, 8);
     int rows = Math.min(maxRows, Math.max(1, (list.size() + columns - 1) / columns));
-    int focusSpace = Math.max(6, (int) Math.ceil(Math.max(width, height) * 0.03f) + 2);
-    int rowHeight = height + 2 * focusSpace;
+    int focusSpace = focusSpace(width, height, zoom);
+    int rowHeight = height + (titleMode == 2 ? 24 : 0) + 2 * focusSpace;
     content.addView(scroll, lp(-1, rowHeight * rows + 6));
     appRows.add(scroll);
+    if (focusedAppRow != null)
+      scroll.setAlpha(getPreferences(0).getInt("inactive_opacity", 75) / 100f);
     LinearLayout grid = vertical();
     grid.setClipChildren(false);
     grid.setClipToPadding(false);
@@ -1211,17 +1253,16 @@ public class MainActivity extends Activity {
     }
     int cardIndex = 0;
     for (App a : list) {
-      if (!showHidden && readIds("hidden").contains(a.pkg)) continue;
       LinearLayout row = gridRows.get((cardIndex++ / columns) % rows);
       final int cardWidth = width;
-      final int radius = getPreferences(0).getInt(a.tv ? "card_radius" : "mobile_radius", 10);
-      final int cardColor = getPreferences(0).getInt("card_color", 0xdd222c40);
+      final int radius = cardRadius(style, width, height);
+      final int cardColor = rowValue(style, "card_color", 0xdd222c40);
       AppCardView card = new AppCardView(this, radius, cardColor);
       card.setTag(rowKey + ":" + a.pkg);
       card.setContentDescription(a.label + ". OK — запуск, удержание OK — меню");
       card.setOnFocusChangeListener(
           (v, f) -> {
-            card.showFocus(f, getPreferences(0).getBoolean("focus_zoom", true), accent());
+            card.showFocus(f, 1f + (float) zoom / width, accent());
             if (f) {
               focusAppRow(scroll);
               if (getPreferences(0).getBoolean("remember_focus", true)) {
@@ -1231,15 +1272,9 @@ public class MainActivity extends Activity {
               }
             }
           });
-      marginAdd(row, card, cardWidth, height, getPreferences(0).getInt("card_gap", 10));
-      boolean useBanner = a.tv && a.banner != null
-          && getPreferences(0).getBoolean("use_banners", true);
-      card.addArtwork(useBanner ? a.banner : a.icon, height - (titles ? 24 : 0), useBanner, !a.tv);
-      TextView name = label((favoriteIds().contains(a.pkg) ? "★ " : "") + a.label, 15, WHITE);
-      name.setSingleLine(true);
-      name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-      name.setGravity(Gravity.CENTER);
-      if (titles) card.contents.addView(name, lp(cardWidth - 8, 24));
+      boolean useBanner = a.banner != null;
+      card.addArtwork(useBanner ? a.banner : a.icon, height - (titleMode == 1 ? 24 : 0), useBanner);
+      addCard(row, card, cardWidth, height, titleMode, a.label, style);
       card.setOnClickListener(
           v -> {
             if (movingPackage != null) finishMove();
@@ -1780,33 +1815,45 @@ public class MainActivity extends Activity {
         currentWallpaper.setColorFilter((dim * 255 / 100) << 24, PorterDuff.Mode.SRC_ATOP);
     }
     if (changed.removeIf(key -> key.equals("show_status") || key.equals("show_network")
+        || key.equals("show_controls") || key.equals("show_information")
+        || key.equals("show_bluetooth") || key.startsWith("bluetooth_")
+        || key.startsWith("network_") || key.startsWith("notifications_")
         || key.equals("show_clock") || key.startsWith("clock_") || key.startsWith("status_")
         || key.equals("show_date") || key.startsWith("date_")
         || key.equals("show_weather") || key.startsWith("weather_")
         || key.contains("_button")
         || key.equals("show_notifications") || key.equals("hide_empty_notifications"))) {
       refreshHeader();
+      applyLauncherPadding();
     }
+    boolean horizontalMargin = changed.contains("margin_left") || changed.contains("margin_right");
     if (changed.removeIf(key -> key.startsWith("margin_"))) {
       applyLauncherPadding();
+      if (horizontalMargin) for (String key : homeRows().keySet()) refreshRow(key);
       if (settingsPanel != null && settingsPanel.isShowing()) settingsPanel.updateWindowBounds();
     }
     if (changed.remove("show_favorites"))
       updateHomeRowVisibility("favorites", getPreferences(0).getBoolean("show_favorites", true));
     boolean tvVisible = getPreferences(0).getBoolean("show_all", true);
-    boolean tvChanged = changed.remove("show_all");
-    if (tvChanged) updateHomeRowVisibility("tv", tvVisible);
-    if (changed.remove("show_mobile") || tvChanged)
-      updateHomeRowVisibility("mobile", tvVisible && getPreferences(0).getBoolean("show_mobile", true));
+    if (changed.remove("show_all")) updateHomeRowVisibility("tv", tvVisible);
+    if (changed.remove("show_mobile"))
+      updateHomeRowVisibility("mobile", getPreferences(0).getBoolean("show_mobile", true));
+    if (changed.remove("show_watch_next")) refreshRow("watch_next");
     if (changed.remove("show_inputs"))
       updateHomeRowVisibility("inputs", getPreferences(0).getBoolean("show_inputs", false));
-    if (changed.remove("show_channels") && currentScreen == 0) {
-      boolean show = getPreferences(0).getBoolean("show_channels", false);
-      if (feeds != null) for (TvFeeds.Channel channel : feeds.channels) {
-        updateHomeRowVisibility("channel:" + channel.id,
-            show && !readIds("hidden_channels").contains(channel.id));
+    if (changed.remove("show_channels") && currentScreen == 0) replaceChannelRows();
+    boolean rowGapChanged = changed.remove("row_gap");
+    boolean cardGapChanged = changed.remove("card_gap");
+    if (cardGapChanged)
+      for (String key : homeRows().keySet()) refreshRow(key);
+    if (rowGapChanged) for (LinearLayout section : homeRowViews.values()) {
+      for (int i = 0; i < section.getChildCount(); i++) {
+        View gap = section.getChildAt(i);
+        if (!"row.gap".equals(gap.getTag())) continue;
+        ViewGroup.LayoutParams bounds = gap.getLayoutParams();
+        bounds.height = dp(getPreferences(0).getInt("row_gap", 12));
+        gap.setLayoutParams(bounds);
       }
-      updateChannelStatus();
     }
     boolean titlesChanged = changed.remove("show_titles");
     if (changed.remove("show_category_icons") || titlesChanged) {
@@ -1826,7 +1873,71 @@ public class MainActivity extends Activity {
         row.setAlpha(row == focusedAppRow ? 1f : alpha);
       }
     }
+    if (changed.remove("accent_color")) {
+      refreshHeader();
+      if (settingsPanel != null && settingsPanel.isShowing()
+          && !settingsPanel.isPage("Палитра цвета")) settingsPanel.refresh();
+    }
     if (!changed.isEmpty()) rebuildLauncherRows();
+  }
+
+  private void refreshRow(String key) {
+    if (currentScreen != 0 || content == null || launcherScroll == null) return;
+    LinearLayout previous = homeRowViews.remove(key);
+    Map<Object, Integer> scrolls = new HashMap<>();
+    Object focusedTag = null;
+    int y = launcherScroll.getScrollY();
+    if (previous != null) {
+      View focused = previous.findFocus();
+      if (focused != null) focusedTag = focused.getTag();
+      appRows.removeIf(view -> belongsTo(view, previous));
+      if (focusedAppRow != null && belongsTo(focusedAppRow, previous)) focusedAppRow = null;
+      launcherRows.entrySet().removeIf(entry -> belongsTo(entry.getValue(), previous));
+      for (int i = 0; i < previous.getChildCount(); i++) {
+        View view = previous.getChildAt(i);
+        if (view instanceof HorizontalScrollView) scrolls.put(view.getTag(), view.getScrollX());
+      }
+      artworkViews.keySet().removeIf(image -> belongsTo(image, previous));
+      content.removeView(previous);
+    }
+    updateHomeRowVisibility(key, true);
+    LinearLayout section = homeRowViews.get(key);
+    View target = section == null || focusedTag == null ? null : section.findViewWithTag(focusedTag);
+    if (target != null) target.requestFocus();
+    else if (focusedTag != null && !settingsOpen) {
+      ArrayList<View> candidates = section == null ? content.getFocusables(View.FOCUS_FORWARD)
+          : section.getFocusables(View.FOCUS_FORWARD);
+      if (!candidates.isEmpty()) candidates.get(0).requestFocus();
+      else launcherScroll.requestFocus();
+    }
+    if (section != null) section.post(() -> {
+      if (homeRowViews.get(key) != section) return;
+      for (int i = 0; i < section.getChildCount(); i++) {
+        View view = section.getChildAt(i);
+        if (view instanceof HorizontalScrollView && scrolls.containsKey(view.getTag()))
+          view.scrollTo(scrolls.get(view.getTag()), 0);
+      }
+      launcherScroll.scrollTo(0, y);
+    });
+  }
+
+  private void reorderHomeRows(List<String> order) {
+    saveOrderedKeys(HOME_ROW_ORDER, order);
+    if (currentScreen != 0 || content == null) return;
+    View focused = content.findFocus();
+    int y = launcherScroll.getScrollY();
+    int index = 0;
+    for (String key : orderedKeys(HOME_ROW_ORDER, homeRows().keySet())) {
+      View row = homeRowViews.get(key);
+      if (row == null) continue;
+      if (content.indexOfChild(row) != index) {
+        content.removeView(row);
+        content.addView(row, index);
+      }
+      index++;
+    }
+    if (focused != null && focused.isShown()) focused.requestFocus();
+    launcherScroll.scrollTo(0, y);
   }
 
   private void rebuildLauncherRows() {
@@ -1867,8 +1978,6 @@ public class MainActivity extends Activity {
         () -> p.open(this::wallpaperSettings));
     p.action("root.power", "☾", "Заставка и сон", "Экран и заставка Android",
         () -> p.open(this::powerSettings));
-    p.action("root.apps", "▦", "Приложения и рекомендации", "Приложения, категории и каналы",
-        () -> p.open(this::appsSettings));
     p.action("root.appearance", "◐", "Оформление интерфейса", "Шрифт, цвет и профили",
         () -> p.open(this::interfaceSettings));
     p.action("root.device", "▤", "Устройство", "Сеть, пульт и системные функции",
@@ -1879,22 +1988,13 @@ public class MainActivity extends Activity {
 
   private void homeSettings(TvSettingsPanel p) {
     p.title("⌂", "Главный экран", "");
-    p.action("home.rows", "≡", "Ряды", "Порядок, заголовки и видимость",
+    p.action("home.categories", "folder", "Управление категориями", "", this::manageCategories);
+    p.action("home.rows", "≡", "Ряды", "Порядок, карточки и видимость",
         () -> p.open(this::rowsSettings));
-    p.action("appearance.cards", "▭", "Карточки", "Размер, пропорции и фокус",
-        () -> p.open(this::cardsSettings));
-    p.action("home.spacing", "ruler", "Поля и интервалы", "",
+    p.action("home.spacing", "ruler", "Оформление рядов", "",
         () -> p.open(this::spacingSettings));
-  }
-
-  private void appsSettings(TvSettingsPanel p) {
-    p.title("▦", "Приложения и рекомендации", "");
-    p.action("apps.library", "▦", "Все приложения", "ТВ и мобильные приложения", this::openLibrary);
+    p.action("apps.library", "▦", "Все приложения", "", this::openLibrary);
     p.action("apps.hidden", "eye_off", "Скрытые приложения", "", () -> openAppList(true));
-    p.action("apps.categories", "folder", "Категории", "Создание, порядок и видимость",
-        this::manageCategories);
-    p.action("apps.channels", "▤", "Каналы приложений", "Рекомендации установленных приложений",
-        () -> p.open(this::channelsSettings));
     p.action("apps.refresh", "↻", "Обновить приложения", "", this::refreshAppList);
   }
 
@@ -1988,13 +2088,16 @@ public class MainActivity extends Activity {
     p.action("device.autostart", "▷", "Автозапуск приложения", "", this::autostartSettings);
     systemSetting(p, "◉", "Сеть", "", android.provider.Settings.ACTION_WIFI_SETTINGS);
     systemSetting(p, "calendar", "Дата и время Android", "", android.provider.Settings.ACTION_DATE_SETTINGS);
-    systemSetting(p, "◉", "Голосовой поиск", "Системный поиск, если установлен",
-        android.app.SearchManager.INTENT_ACTION_GLOBAL_SEARCH);
+    p.action("device.voice_search", "search", "Голосовой поиск", "",
+        () -> p.open(page -> {
+          page.title("search", "Голосовой поиск", "");
+          page.action("voice.choose", "search", "Выбор голосового поиска", "", this::chooseVoiceSearch);
+        }));
     if (availableTvInputs().isEmpty())
       p.unavailable("⇥", "Источники сигнала", "Нет доступных входов телевизора");
     else p.action("device.inputs", "⇥", "Источники сигнала", "Входы телевизора", this::showInputs);
-    systemSetting(p, "⌁", "Пульты и устройства", "Системное сопряжение Bluetooth",
-        android.provider.Settings.ACTION_BLUETOOTH_SETTINGS);
+    p.action("device.bluetooth", "⌁", "Пульты и устройства", "Системное сопряжение Bluetooth",
+        this::openBluetooth);
     p.action("device.parental", "shield", "Родительский контроль", "PIN для настроек и приложений",
         () -> p.open(this::parentalSettings));
     systemSetting(p, "♿", "Специальные возможности", "Системные настройки доступности",
@@ -2291,28 +2394,203 @@ public class MainActivity extends Activity {
 
   void rowsSettings(TvSettingsPanel p) {
     p.title("≡", "Ряды", "Удерживайте OK, затем ↑ ↓. OK — сохранить, Назад — отменить.");
-    p.section("Порядок рядов");
     Map<String, HomeRow> rows = homeRows();
     for (String key : orderedKeys(HOME_ROW_ORDER, rows.keySet())) {
       HomeRow row = rows.get(key);
-      p.reorderableAction(key, row.icon, row.title, "", () -> p.open(row.settings), order -> {
-        saveOrderedKeys(HOME_ROW_ORDER, order);
-        rebuildLauncherRows();
-      });
+      p.reorderableAction(key, row.icon, row.title,
+          key.startsWith("recommendations:") ? "Каналы рекомендаций по приложениям" : "",
+          () -> p.open(row.settings), this::reorderHomeRows);
     }
-    p.section("Оформление и навигация");
-    toggle(p, "T", "Показывать названия категорий", "show_titles", true);
-    toggle(p, "▣", "Значок перед заголовком", "show_category_icons", true);
-    toggle(p, "⌖", "Запоминать карточку", "remember_focus", true);
-    toggle(p, "⌖", "Закреплять выбранную строку", "pin_row", false);
-    slider(p, "◐", "Непрозрачность неактивных строк", "inactive_opacity", 75, 20, 100, " %");
-    p.action("rows.categories", "folder", "Управление категориями", "", this::manageCategories);
+    p.action("tv_feeds.settings", "▤", "Разрешение и обновление каналов", "",
+        () -> p.open(this::channelsSettings));
   }
 
-  private void rowVisibility(TvSettingsPanel p, String title, String icon, String key,
-      boolean defaultValue) {
+  private void rowSettings(TvSettingsPanel p, String id, String title, String icon,
+      String visibility, boolean defaultValue) {
     p.title(icon, title, "");
-    toggle(p, "eye", "Показывать ряд", key, defaultValue);
+    toggle(p, "eye", "Показывать ряд", visibility, defaultValue);
+    rowAppearance(p, id);
+    if ("favorites".equals(id))
+      p.action("favorites.manage", "☆", "Управление избранным", "",
+          () -> p.open(this::manageFavorites));
+  }
+
+  private void manageFavorites(TvSettingsPanel p) {
+    p.title("☆", "Управление избранным", "");
+    Set<String> added = new HashSet<>();
+    for (App app : installed) if (added.add(app.pkg))
+      p.toggle(app.tv ? "▤" : "▯", app.label, "", favoriteIds().contains(app.pkg), value -> {
+        List<String> ids = favoriteIds();
+        ids.remove(app.pkg);
+        if (value) ids.add(app.pkg);
+        saveFavorites(ids);
+        refreshRow("favorites");
+      });
+  }
+
+  private void recommendationSettings(TvSettingsPanel p, String key, String title,
+      List<TvFeeds.Channel> channels) {
+    Drawable icon = null;
+    try {
+      if (channels.get(0).pkg != null) icon = getPackageManager().getApplicationIcon(channels.get(0).pkg);
+    } catch (PackageManager.NameNotFoundException ignored) {
+      // A source may be uninstalled while its provider rows are still cached.
+    }
+    p.title(icon, "▤", title, "");
+    p.toggle("eye", "Показывать ряд", "", recommendationsEnabled(key), value -> {
+      getPreferences(0).edit().putBoolean("visible:" + key, value).apply();
+      refreshRow(key);
+      p.refresh();
+    });
+    for (TvFeeds.Channel channel : channels)
+      p.toggle("▤", channel.title, "", recommendationsEnabled(key)
+          && !readIds("hidden_channels").contains(channel.id), value -> {
+        List<String> hidden = readIds("hidden_channels");
+        hidden.remove(channel.id);
+        if (!value) hidden.add(channel.id);
+        getPreferences(0).edit().putString("hidden_channels",
+            android.text.TextUtils.join("|", hidden)).apply();
+        if (value && !recommendationsEnabled(key))
+          getPreferences(0).edit().putBoolean("visible:" + key, true).apply();
+        refreshRow(key);
+        p.refresh();
+      });
+    rowAppearance(p, key);
+  }
+
+  private String rowPreference(String row, String key) {
+    return "row:" + row + ":" + key;
+  }
+
+  private int rowValue(String row, String key, int fallback) {
+    android.content.SharedPreferences prefs = getPreferences(0);
+    String scoped = rowPreference(row, key);
+    if (prefs.contains(scoped)) return prefs.getInt(scoped, fallback);
+    String legacy = "row_" + row.replaceAll("[^A-Za-z0-9]+", "_") + "_";
+    String legacySetting = "zoom_dp".equals(key) ? "focus_zoom"
+        : "mobile".equals(row) && "card_ratio".equals(key) ? "mobile_ratio" : key;
+    if (prefs.contains(legacy + legacySetting)) {
+      int value = prefs.getInt(legacy + legacySetting, fallback);
+      return "zoom_dp".equals(key) ? value == 2 ? 12 : 6 : value;
+    }
+    if ("card_ratio".equals(key) && "mobile".equals(row)) key = "mobile_ratio";
+    if ("card_radius".equals(key) && "mobile".equals(row)) key = "mobile_radius";
+    if ("zoom_dp".equals(key) && prefs.contains("focus_zoom")) {
+      try {
+        return prefs.getInt("focus_zoom", 1) == 2 ? 12 : 6;
+      } catch (ClassCastException legacyBoolean) {
+        return 6;
+      }
+    }
+    return prefs.getInt(key, fallback);
+  }
+
+  private int titleMode(String row) {
+    String legacy = "row_" + row.replaceAll("[^A-Za-z0-9]+", "_") + "_card_titles";
+    return rowValue(row, "title_mode", getPreferences(0).getBoolean(legacy,
+        getPreferences(0).getBoolean("card_titles", false)) ? 1 : 0);
+  }
+
+  private int cardWidth(String row) {
+    return Appearance.clamp(Math.round(rowValue(row, "card_width", 80) / 20f) * 20, 60, 240);
+  }
+
+  private int cardRadius(String row, int width, int height) {
+    int maximum = Math.min(width, height) / 2;
+    int setting = rowValue(row, "card_radius", 10);
+    return setting >= 120 ? maximum : Appearance.clamp(setting, 0, maximum);
+  }
+
+  private int focusSpace(int width, int height, int zoom) {
+    return Math.max(6, (int) Math.ceil(Math.max(width, height) * zoom / (2f * width)) + 3);
+  }
+
+  private void setRowValue(String row, String key, int value) {
+    getPreferences(0).edit().putInt(rowPreference(row, key), value).apply();
+    if ("card_color".equals(key) || "title_color".equals(key)) {
+      LinearLayout section = homeRowViews.get(row);
+      if (section != null) recolorRow(section, key, value);
+    } else {
+      refreshRow(row);
+    }
+  }
+
+  private void recolorRow(View view, String key, int value) {
+    if (view instanceof AppCardView && "card_color".equals(key)) {
+      ((AppCardView) view).setCardColor(value);
+    } else if (view instanceof TextView && "row.caption".equals(view.getTag())
+        && "title_color".equals(key)) {
+      ((TextView) view).setTextColor(value);
+    } else if (view instanceof ViewGroup) {
+      ViewGroup group = (ViewGroup) view;
+      for (int i = 0; i < group.getChildCount(); i++) recolorRow(group.getChildAt(i), key, value);
+    }
+  }
+
+  private void rowChoice(TvSettingsPanel panel, String row, String key, String title,
+      String[] options, int selected) {
+    panel.open(page -> {
+      page.title("▤", title, "");
+      for (int i = 0; i < options.length; i++) {
+        final int index = i;
+        page.action("row.option." + i, i == selected ? "✓" : "▤", options[i], "", () -> {
+          setRowValue(row, key, index);
+          page.onBackPressed();
+        });
+      }
+    });
+  }
+
+  private void rowAppearance(TvSettingsPanel p, String row) {
+    p.action("row.title", "T", "Показывать название карточек", "", () -> rowChoice(p, row,
+        "title_mode", "Показывать название карточек", new String[] {"Выкл.", "В плитке", "Под плиткой"},
+        titleMode(row)));
+    p.slider("▦", "Рядов приложений в категории", 1, 8, rowValue(row, "grid_rows", 3), "",
+        value -> setRowValue(row, "grid_rows", value));
+    p.slider("▭", "Размер карточки", 60, 240, cardWidth(row), 20, "",
+        value -> setRowValue(row, "card_width", value));
+    p.slider("◯", "Радиус скругления", 0, 120, rowValue(row, "card_radius", 10), "",
+        value -> setRowValue(row, "card_radius", value));
+    p.slider("⌖", "Увеличение выбранной карточки", 6, 12, rowValue(row, "zoom_dp", 6), 2, "",
+        value -> setRowValue(row, "zoom_dp", value));
+    boolean programs = row.startsWith("recommendations:") || row.equals("watch_next");
+    String[] ratios = programs ? new String[] {"16:9", "1:1", "4:3", "2:3"} : cardRatios();
+    p.action("row.ratio", "▭", "Пропорции ТВ-карточек", "", () -> rowChoice(p, row,
+        "card_ratio", "Пропорции ТВ-карточек", ratios, rowValue(row, "card_ratio",
+            "mobile".equals(row) ? 1 : 0)));
+    p.action("row.background", "◐", "Цвет фона", "", () -> openPanelPage(page -> page.palette(
+        "Цвет фона", rowValue(row, "card_color", 0xdd222c40), 0xdd222c40,
+        value -> setRowValue(row, "card_color", value))));
+    p.action("row.title_color", "T", "Цвет названия приложения", "", () -> openPanelPage(page -> page.palette(
+        "Цвет названия приложения", rowValue(row, "title_color", WHITE), WHITE,
+        value -> setRowValue(row, "title_color", value))));
+  }
+
+  private void addCard(LinearLayout row, AppCardView card, int width, int height, int mode,
+      String title, String style) {
+    int gap = getPreferences(0).getInt("card_gap", 10);
+    if (mode == 0) {
+      marginAdd(row, card, width, height, gap);
+      return;
+    }
+    TextView name = label(title, 14, rowValue(style, "title_color", WHITE));
+    name.setTag("row.caption");
+    name.setSingleLine(true);
+    name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+    name.setGravity(Gravity.CENTER);
+    if (mode == 1) {
+      int textWidth = width - 12;
+      if (width == height && cardRadius(style, width, height) == width / 2)
+        textWidth = Math.min(textWidth, Math.round(width * .65f));
+      card.contents.addView(name, lp(textWidth, 24));
+      marginAdd(row, card, width, height, gap);
+    } else {
+      LinearLayout cell = vertical();
+      cell.setClipChildren(false);
+      cell.addView(card, lp(width, height));
+      cell.addView(name, lp(width, 24));
+      marginAdd(row, cell, width, height + 24, gap);
+    }
   }
 
   private void setRowVisibility(String preference, String key, boolean visible) {
@@ -2320,47 +2598,21 @@ public class MainActivity extends Activity {
     hidden.remove(key);
     if (!visible) hidden.add(key);
     getPreferences(0).edit().putString(preference, android.text.TextUtils.join("|", hidden)).apply();
-    boolean channel = "hidden_channels".equals(preference);
-    updateHomeRowVisibility((channel ? "channel:" : "category:") + key,
-        visible && (!channel || getPreferences(0).getBoolean("show_channels", false)));
+    updateHomeRowVisibility("category:" + key, visible);
   }
 
   private void spacingSettings(TvSettingsPanel p) {
-    p.title("ruler", "Поля и интервалы", "");
-    slider(p, "↑", "Верхний отступ", "margin_top", 20, 0, 100, " dp");
-    slider(p, "←", "Отступ слева", "margin_left", 28, 0, 100, " dp");
-    slider(p, "→", "Отступ справа", "margin_right", 28, 0, 100, " dp");
-    slider(p, "↕", "Интервал между рядами", "row_gap", 12, 0, 48, " dp");
-    slider(p, "↔", "Расстояние между карточками", "card_gap", 10, 2, 32, " dp");
-  }
-
-  void cardsSettings(TvSettingsPanel p) {
-    p.title("▭", "Карточки", "");
-    toggle(p, "T", "Показывать название приложения", "card_titles", false);
-    toggle(p, "▧", "Использовать TV-баннеры", "use_banners", true);
-    slider(p, "▦", "Строк приложений в категории", "grid_rows", 3, 1, 3, "");
-    slider(p, "▭", "Размер карточки", "card_width", 126, 80, 240, " dp");
-    slider(p, "◯", "Радиус скругления", "card_radius", 10, 0, 28, " dp");
-    slider(p, "▣", "Размер значков без баннера", "icon_size", 44, 24, 80, " dp");
-    toggle(p, "⌖", "Увеличение выбранной карточки", "focus_zoom", true);
-    p.action("cards.ratio", "▭", "Пропорции ТВ-карточек", "16:9 / 1:1 / 4:3",
-        () -> chooseSetting("card_ratio", "Пропорции ТВ-карточек", cardRatios(), 0));
-    p.action("cards.color", "◐", "Цвет карточек", "", () -> chooseColor("card_color", false));
-    p.action("cards.mobile", "▯", "Мобильные карточки", "Значок, пропорции и фон",
-        () -> p.open(this::mobileCardSettings));
-  }
-
-  private void mobileCardSettings(TvSettingsPanel p) {
-    p.title("▯", "Мобильные карточки", "");
-    p.action("▣", "Режим изображения", "", () -> chooseSetting(
-        "mobile_icon_mode", "Режим изображения",
-        new String[] {"Заполнить", "Вписать", "Оригинальный размер"}, 0));
-    slider(p, "▣", "Масштаб значка", "mobile_icon_scale", 100, 60, 140, " %");
-    slider(p, "↔", "Внутренние поля", "mobile_icon_padding", 4, 0, 24, " dp");
-    slider(p, "◯", "Скругление мобильной карточки", "mobile_radius", 10, 0, 28, " dp");
-    p.action("◐", "Фон мобильной карточки", "", () -> chooseColor("mobile_card_color", false));
-    p.action("cards.mobile.ratio", "▭", "Пропорции", "16:9 / 1:1 / 4:3",
-        () -> chooseSetting("mobile_ratio", "Пропорции мобильных карточек", cardRatios(), 1));
+    p.title("ruler", "Оформление рядов", "");
+    toggle(p, "T", "Показывать названия рядов", "show_titles", true);
+    toggle(p, "▣", "Значки категорий", "show_category_icons", true);
+    toggle(p, "⌖", "Запоминать фокус", "remember_focus", true);
+    toggle(p, "⌖", "Закреплять выбранный ряд", "pin_row", false);
+    slider(p, "◐", "Непрозрачность неактивных рядов", "inactive_opacity", 75, 20, 100, " %");
+    slider(p, "↑", "Верхний отступ", "margin_top", 20, 0, 100, "");
+    slider(p, "←", "Отступ слева", "margin_left", 28, 0, 100, "");
+    slider(p, "→", "Отступ справа", "margin_right", 28, 0, 100, "");
+    slider(p, "↕", "Интервал между рядами", "row_gap", 12, 0, 48, "");
+    slider(p, "↔", "Расстояние между карточками", "card_gap", 10, 2, 32, "");
   }
 
   private static String[] cardRatios() {
@@ -2451,18 +2703,15 @@ public class MainActivity extends Activity {
 
   private void statusStyle(TvSettingsPanel p) {
     p.title("◐", "Оформление панели", "");
-    toggle(p, "━", "Показывать строку состояния", "show_status", true);
-    p.action("▣", "Значки и текст", "", () -> chooseSetting("status_label_mode", "Значки и текст",
-        new String[] {"Только значки", "Только текст", "Значки и текст"}, 2));
+    toggle(p, "━", "Показывать верхнюю панель", "show_status", true);
+    toggle(p, "eye", "Показывать блок управления и связи", "show_controls", true);
+    toggle(p, "eye", "Показывать блок погоды, даты и часов", "show_information", true);
     slider(p, "◯", "Скругление", "status_radius", 100, 0, 100, " %");
-    slider(p, "◐", "Прозрачность фона", "status_transparency", 30, 0, 100, " %");
     slider(p, "T", "Размер текста", "status_size", 15, 10, 28, " sp");
-    slider(p, "▣", "Размер значков", "status_icon_size", 20, 12, 28, " dp");
-    slider(p, "↔", "Интервал", "status_gap", 8, 0, 24, " dp");
-    slider(p, "↔", "Внутренние поля", "status_padding", 8, 0, 24, " dp");
-    toggle(p, "◐", "Тень текста", "status_shadow", false);
-    toggle(p, "◐", "Тень панели", "status_elevation", false);
-    p.action("◐", "Цвет текста и значков", "", () -> chooseColor("status_color", false));
+    slider(p, "▣", "Размер значков", "status_icon_size", 20, 12, 28, "");
+    slider(p, "↔", "Интервал", "status_gap", 8, 0, 24, "");
+    slider(p, "↔", "Внутренние поля", "status_padding", 8, 0, 24, "");
+    p.action("◐", "Цвет текста и значка", "", () -> chooseColor("status_color", false));
     p.action("◐", "Цвет фона", "", () -> chooseColor("status_background", false));
   }
 
@@ -2482,55 +2731,65 @@ public class MainActivity extends Activity {
   }
 
   private void statusInformation(TvSettingsPanel p) {
-    p.title("◷", "Погода, дата и часы", "");
-    p.action("status.weather", "☁", "Погода", "Город, размер, цвет",
-        () -> p.open(this::weatherSettings));
-    p.action("status.date", "calendar", "Дата", "Размер, цвет, формат", () -> p.open(this::dateSettings));
-    p.action("status.clock", "◷", "Часы", "Размер, цвет, формат", () -> p.open(this::clockSettings));
+    statusItems(p, false);
   }
 
   private void statusControls(TvSettingsPanel p) {
-    p.title("▦", "Управление и связь", "");
-    p.action("status.apps", "▦", "Кнопка «Приложения»", "",
-        () -> p.open(page -> headerButtonSettings(page, "▦", "Приложения", "apps_button")));
-    p.action("status.search", "search", "Кнопка «Поиск»", "",
-        () -> p.open(page -> headerButtonSettings(page, "search", "Поиск", "search_button")));
-    p.action("status.settings", "⚙", "Кнопка «Настройки»", "",
-        () -> p.open(page -> headerButtonSettings(page, "⚙", "Настройки", "settings_button")));
-    p.action("status.timer", "sleep_timer", "Кнопка «Таймер сна»", "",
-        () -> p.open(page -> headerButtonSettings(page, "sleep_timer", "Таймер сна", "timer_button")));
-    p.action("status.network", "◉", "Сеть", "", () -> p.open(page -> {
-      page.title("◉", "Сеть", "");
-      toggle(page, "eye", "Показывать подключение", "show_network", true);
-    }));
-    p.action("status.notifications", "♧", "Уведомления", "", () -> p.open(page -> {
-      page.title("♧", "Уведомления", "");
-      toggle(page, "eye", "Показывать значок уведомлений", "show_notifications", true);
-      toggle(page, "eye_off", "Скрывать пустой значок", "hide_empty_notifications", false);
-      page.action("♧", "Доступ и список уведомлений", "", () -> page.open(this::notificationSettings));
-    }));
+    statusItems(p, true);
   }
 
-  private void headerButtonSettings(TvSettingsPanel p, String icon, String title, String key) {
-    p.title(icon, "Кнопка «" + title + "»", "");
+  private void statusItems(TvSettingsPanel p, boolean controls) {
+    p.title(controls ? "▦" : "◷", controls ? "Управление и связь" : "Погода, дата и часы",
+        "Удерживайте OK, затем ↑ ↓. OK — сохранить.");
+    for (HeaderItem item : headerItems(controls))
+      p.reorderableAction(item.key, item.icon, item.title, "",
+          () -> p.open(page -> {
+            if (item == HeaderItem.WEATHER) weatherSettings(page);
+            else if (item == HeaderItem.DATE) dateSettings(page);
+            else if (item == HeaderItem.CLOCK) clockSettings(page);
+            else headerButtonSettings(page, item);
+          }), order -> {
+            saveOrderedKeys(controls ? CONTROL_ORDER : INFORMATION_ORDER, order);
+            refreshHeader();
+          });
+  }
+
+  private void commonButtonSettings(TvSettingsPanel p, HeaderItem item) {
+    String key = item.setting;
     toggle(p, "eye", "Показывать кнопку", "show_" + key, true);
-    slider(p, "T", "Размер текста", key + "_size", 14, 10, 26, " sp");
-    toggle(p, "◐", "Тень текста", key + "_shadow", false);
-    p.action("◐", "Цвет текста и значка", "", () -> chooseColor(key + "_color", false));
-    p.action(icon, "Вид кнопки", "", () -> chooseSetting(key + "_mode", "Вид кнопки",
-        new String[] {"Только значок", "Только текст", "Значок и текст"},
-        getPreferences(0).getInt("status_label_mode", 2)));
-    if ("timer_button".equals(key)) {
+    p.action("button.mode", item.icon, "Вид кнопки", "", () -> p.open(page -> {
+      page.title(item.icon, "Вид кнопки", "");
+      String[] modes = {"Только значок", "Только текст", "Значок и текст"};
+      for (int i = 0; i < modes.length; i++) {
+        final int mode = i;
+        page.action("button.mode." + i, i == buttonMode(key) ? "✓" : item.icon, modes[i], "", () -> {
+          setInt(key + "_mode", mode);
+          page.onBackPressed();
+        });
+      }
+    }));
+    int mode = buttonMode(key);
+    String title = mode == 0 ? "Цвет значка" : mode == 1 ? "Цвет текста" : "Цвет текста и значка";
+    int fallback = getPreferences(0).getInt("status_color", WHITE);
+    p.action("button.color", "◐", title, "", () -> p.open(page -> page.palette(title,
+        getPreferences(0).getInt(key + "_color", fallback), fallback,
+        value -> setInt(key + "_color", value))));
+  }
+
+  private void headerButtonSettings(TvSettingsPanel p, HeaderItem item) {
+    p.title(item.icon, item.title, "");
+    commonButtonSettings(p, item);
+    if (item == HeaderItem.TIMER)
       p.action("sleep_timer", "Настроить таймер", "", () -> p.open(this::sleepTimerSettings));
+    if (item == HeaderItem.NOTIFICATIONS) {
+      toggle(p, "eye_off", "Скрывать пустой значок", "hide_empty_notifications", false);
+      p.action("♧", "Доступ к уведомлениям", "", this::openNotificationAccess);
     }
   }
 
   private void dateSettings(TvSettingsPanel p) {
     p.title("calendar", "Дата", "");
-    toggle(p, "calendar", "Показывать дату", "show_date", true);
-    slider(p, "T", "Размер шрифта даты", "date_size", 15, 10, 28, " sp");
-    toggle(p, "◐", "Тень даты", "date_shadow", false);
-    p.action("◐", "Цвет даты", "", () -> chooseColor("date_color", false));
+    commonButtonSettings(p, HeaderItem.DATE);
     p.action("calendar", "Формат даты", "", () -> chooseSetting("date_format", "Формат даты",
         new String[] {"Короткая", "С днём недели"}, 0));
   }
@@ -2547,10 +2806,7 @@ public class MainActivity extends Activity {
 
   void clockSettings(TvSettingsPanel p) {
     p.title("◷", "Часы", "");
-    toggle(p, "◷", "Показывать часы", "show_clock", true);
-    slider(p, "T", "Размер шрифта часов", "clock_size", 17, 10, 32, " sp");
-    toggle(p, "◐", "Тень часов", "clock_shadow", true);
-    p.action("◐", "Цвет часов", "", () -> chooseColor("clock_color", false));
+    commonButtonSettings(p, HeaderItem.CLOCK);
     p.action(
         "◷",
         "Формат часов",
@@ -2576,12 +2832,9 @@ public class MainActivity extends Activity {
 
   void weatherSettings(TvSettingsPanel p) {
     p.title("☁", "Погода", "Прогноз обновляется автоматически каждый час");
-    toggle(p, "☁", "Показывать погоду", "show_weather", true);
+    commonButtonSettings(p, HeaderItem.WEATHER);
     p.action(
         "⌖", "Город", getPreferences(0).getString("weather_city", "Не выбран"), this::weatherCity);
-    slider(p, "T", "Размер шрифта погоды", "weather_size", 13, 10, 26, " sp");
-    toggle(p, "◐", "Тень погоды", "weather_shadow", true);
-    p.action("◐", "Цвет погоды", "", () -> chooseColor("weather_color", false));
     p.action("weather.connection", "↻", "Проверить соединение", "", this::checkWeatherConnection);
     p.action(
         "!",
@@ -2617,22 +2870,19 @@ public class MainActivity extends Activity {
   }
 
   void chooseColor(String key, boolean reopen) {
-    String[] names = {"Розовый", "Бирюзовый", "Голубой", "Белый", "Тёмный"};
-    int[] colors = {0xffff94b2, 0xff8de7d3, 0xff9ecaff, 0xfff5f7ff, 0xdd222c40};
-    new NovaDialog(this)
-        .setTitle("Цвет")
-        .setItems(
-            names,
-            (d, n) -> {
-              setInt(key, colors[n]);
-              if (reopen) {
-                handler.removeCallbacks(redraw);
-                applyPendingAppearance();
-                if (settingsPanel != null && settingsPanel.isShowing()) settingsPanel.refresh();
-              }
-            })
-        .setNegativeButton("Отмена", null)
-        .show();
+    int fallback = "status_background".equals(key) ? 0xb2101a30
+        : "accent_color".equals(key) ? 0xffff94b2 : WHITE;
+    boolean panelBackground = "status_background".equals(key);
+    String title = panelBackground ? "Цвет фона" : "Палитра цвета";
+    int saved = panelBackground ? StatusBarView.backgroundColor(getPreferences(0))
+        : getPreferences(0).getInt(key, fallback);
+    openPanelPage(p -> p.palette(title, saved, fallback, value -> {
+      if ("status_background".equals(key))
+        getPreferences(0).edit().putBoolean("status_background_argb", true).apply();
+      setInt(key, value);
+      handler.removeCallbacks(redraw);
+      applyPendingAppearance();
+    }));
   }
 
   void openPanelPage(TvSettingsPanel.Page page) {
@@ -2659,25 +2909,47 @@ public class MainActivity extends Activity {
     openAppList(false);
   }
 
-  private void searchApps() {
-    EditText input = new EditText(this);
-    input.setSingleLine(true);
-    input.setHint("Название приложения");
-    new NovaDialog(this).setTitle("Поиск приложений").setView(input)
-        .setPositiveButton("Найти", (dialog, button) -> {
-          String name = input.getText().toString().trim();
-          String query = name.toLowerCase(RUSSIAN);
-          openPanelPage(p -> {
-            p.title("search", "Поиск приложений", name);
-            boolean found = false;
-            for (App app : visibleApps(installed, false)) {
-              if (!app.label.toLowerCase(RUSSIAN).contains(query)) continue;
-              addLibraryApp(p, app, false);
-              found = true;
-            }
-            if (!found) p.section("Приложений не найдено");
-          });
-        }).setNegativeButton("Отмена", null).show();
+  private Intent voiceIntent(String action) {
+    return new Intent(action).putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+        android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+  }
+
+  private void voiceSearch() {
+    String preferred = getPreferences(0).getString("voice_component", "");
+    ComponentName chosen = ComponentName.unflattenFromString(preferred);
+    if (chosen != null) {
+      String action = getPreferences(0).getString("voice_action",
+          android.speech.RecognizerIntent.ACTION_WEB_SEARCH);
+      if (tryStart(voiceIntent(action).setComponent(chosen))) return;
+      getPreferences(0).edit().remove("voice_component").remove("voice_action").apply();
+    }
+    if (tryStart(voiceIntent(android.speech.RecognizerIntent.ACTION_WEB_SEARCH))) return;
+    if (tryStart(voiceIntent(android.speech.RecognizerIntent.ACTION_VOICE_SEARCH_HANDS_FREE))) return;
+    Toast.makeText(this, "Нет доступного приложения голосового поиска", Toast.LENGTH_LONG).show();
+  }
+
+  private void chooseVoiceSearch() {
+    openPanelPage(p -> {
+      p.title("search", "Выбор голосового поиска", "Для кнопки поиска NovaTV");
+      p.action("voice.system", "⚙", "Системные настройки голосового ввода", "",
+          () -> safeStart(new Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS)));
+      Map<ComponentName, String> actions = new LinkedHashMap<>();
+      for (String action : new String[] {android.speech.RecognizerIntent.ACTION_WEB_SEARCH,
+          android.speech.RecognizerIntent.ACTION_VOICE_SEARCH_HANDS_FREE}) {
+        for (ResolveInfo info : getPackageManager().queryIntentActivities(voiceIntent(action),
+            PackageManager.MATCH_DEFAULT_ONLY)) {
+          ComponentName component = new ComponentName(info.activityInfo.packageName, info.activityInfo.name);
+          if (actions.putIfAbsent(component, action) == null)
+            p.app(component.flattenToString(), info.loadLabel(getPackageManager()).toString(), "",
+                info.loadIcon(getPackageManager()), () -> {
+                  getPreferences(0).edit().putString("voice_component", component.flattenToString())
+                      .putString("voice_action", action).apply();
+                  p.onBackPressed();
+                }, null);
+        }
+      }
+      if (actions.isEmpty()) p.section("Нет доступных обработчиков");
+    });
   }
 
   void openAppList(boolean hidden) {
@@ -2749,7 +3021,7 @@ public class MainActivity extends Activity {
   }
 
   String[] appearanceKeys() {
-    return new String[] {
+    Set<String> keys = new LinkedHashSet<>(Arrays.asList(new String[] {
       "card_width",
       "grid_rows",
       "card_titles",
@@ -2808,8 +3080,21 @@ public class MainActivity extends Activity {
       "mobile_icon_mode", "mobile_icon_scale", "mobile_icon_padding", "mobile_radius",
       "mobile_card_color", "status_label_mode", "status_radius", "status_transparency",
       "status_size", "status_icon_size", "status_gap", "status_padding",
-      "status_shadow", "status_elevation", "status_color", "status_background"
-    };
+      "status_color", "status_background", "status_background_argb", "show_controls", "show_information", "show_watch_next",
+      CONTROL_ORDER, INFORMATION_ORDER
+    }));
+    for (HeaderItem item : HeaderItem.values()) {
+      keys.add("show_" + item.setting);
+      keys.add(item.setting + "_mode");
+      keys.add(item.setting + "_color");
+    }
+    for (String key : getPreferences(0).getAll().keySet())
+      if (scopedAppearance(key)) keys.add(key);
+    return keys.toArray(new String[0]);
+  }
+
+  private boolean scopedAppearance(String key) {
+    return key.startsWith("row:") || key.startsWith("row_") || key.startsWith("visible:recommendations:");
   }
 
   void profileSettings(TvSettingsPanel p) {
@@ -2867,7 +3152,13 @@ public class MainActivity extends Activity {
                                     getPreferences(0).getString("profile_" + name, "{}"));
                             android.content.SharedPreferences.Editor edit =
                                 getPreferences(0).edit();
-                            for (String key : appearanceKeys()) {
+                            Set<String> profileKeys = new LinkedHashSet<>(Arrays.asList(appearanceKeys()));
+                            Iterator<String> savedKeys = data.keys();
+                            while (savedKeys.hasNext()) {
+                              String key = savedKeys.next();
+                              if (scopedAppearance(key)) profileKeys.add(key);
+                            }
+                            for (String key : profileKeys) {
                               edit.remove(key);
                               Object value = data.opt(key);
                               if (value instanceof Boolean) edit.putBoolean(key, (Boolean) value);
@@ -2903,7 +3194,7 @@ public class MainActivity extends Activity {
     try {
       if (manager != null)
         for (android.media.tv.TvInputInfo input : manager.getTvInputList())
-          if (canOpen(tvInputIntent(input))) inputs.add(input);
+          if (input.isPassthroughInput() || canOpen(tvInputIntent(input))) inputs.add(input);
     } catch (SecurityException ignored) {
       // Some firmware exposes the service only to its built-in launcher.
     }
@@ -2913,7 +3204,7 @@ public class MainActivity extends Activity {
   private Intent tvInputIntent(android.media.tv.TvInputInfo input) {
     android.net.Uri uri = input.isPassthroughInput()
         ? android.media.tv.TvContract.buildChannelUriForPassthroughInput(input.getId())
-        : android.media.tv.TvContract.Channels.CONTENT_URI;
+        : android.media.tv.TvContract.buildChannelsUriForInput(input.getId());
     return new Intent(Intent.ACTION_VIEW, uri);
   }
 
@@ -2941,13 +3232,15 @@ public class MainActivity extends Activity {
             .contains(new ComponentName(this, NotificationAccess.class).flattenToString());
   }
 
+  private void openNotificationAccess() {
+    if (!tryStart(new Intent(android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)))
+      safeStart(new Intent(android.provider.Settings.ACTION_SETTINGS));
+  }
+
   void notificationSettings(TvSettingsPanel p) {
     p.title("♧", "Уведомления", "Тексты хранятся только в памяти Nova home Launcher");
-    systemSetting(p,
-        "⚙",
-        "Доступ к уведомлениям",
-        notificationGranted() ? "Предоставлен" : "Требуется ваше разрешение в Android",
-        android.provider.Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+    p.action("notification.access", "⚙", "Доступ к уведомлениям", notificationGranted()
+        ? "Предоставлен" : "Разрешите NovaTV читать уведомления приложений", this::openNotificationAccess);
     if (notificationGranted()) {
       p.toggle("▣", "Показывать системные уведомления", "Включая фоновые службы",
           getPreferences(0).getBoolean("show_ongoing_notifications", false), value -> {
@@ -2968,9 +3261,20 @@ public class MainActivity extends Activity {
         }
         p.notification(
             item.title.isEmpty() ? app : item.title,
-            item.text.isEmpty() ? (item.title.isEmpty() ? "" : app) : app + " · " + item.text,
+            app + " · " + android.text.format.DateFormat.getTimeFormat(this).format(new Date(item.postTime))
+                + (item.text.isEmpty() ? "" : " · " + item.text),
             icon,
             () -> {
+              if (item.contentIntent != null) {
+                guardApp(item.pkg, () -> {
+                  try {
+                    item.contentIntent.send();
+                  } catch (android.app.PendingIntent.CanceledException ignored) {
+                    Toast.makeText(this, "Уведомление больше недоступно", Toast.LENGTH_SHORT).show();
+                  }
+                });
+                return;
+              }
               Intent launch = getPackageManager().getLeanbackLaunchIntentForPackage(item.pkg);
               if (launch == null) launch = getPackageManager().getLaunchIntentForPackage(item.pkg);
               if (launch != null) {
@@ -2979,7 +3283,7 @@ public class MainActivity extends Activity {
               }
             });
       }
-      if (notifications.isEmpty()) p.section("Нет уведомлений");
+      if (notifications.isEmpty()) p.section("Нет новых уведомлений");
       p.action("▷", "Сейчас играет", "Активные медиасессии", this::showNowPlaying);
     }
   }
@@ -3054,29 +3358,18 @@ public class MainActivity extends Activity {
                 feedsLoaded = System.currentTimeMillis();
                 if (settingsPanel != null
                     && settingsPanel.isShowing()
-                    && settingsPanel.isPage("Каналы приложений")) settingsPanel.refresh();
+                    && (settingsPanel.isPage("Каналы приложений") || settingsPanel.isPage("Ряды"))) settingsPanel.refresh();
                 if (currentScreen == 0) replaceChannelRows();
               });
         });
   }
 
   private void replaceChannelRows() {
-    Iterator<Map.Entry<String, LinearLayout>> rows = homeRowViews.entrySet().iterator();
-    while (rows.hasNext()) {
-      Map.Entry<String, LinearLayout> row = rows.next();
-      if (!row.getKey().startsWith("channel:")) continue;
-      LinearLayout section = row.getValue();
-      artworkViews.keySet().removeIf(image -> belongsTo(image, section));
-      content.removeView(section);
-      rows.remove();
-    }
-    if (getPreferences(0).getBoolean("show_channels", false)) {
-      Set<String> hidden = new HashSet<>(readIds("hidden_channels"));
-      for (TvFeeds.Channel channel : feeds.channels) {
-        if (!hidden.contains(channel.id)) updateHomeRowVisibility("channel:" + channel.id, true);
-      }
-    }
-    updateChannelStatus();
+    Set<String> keys = new LinkedHashSet<>(homeRowViews.keySet());
+    keys.removeIf(key -> !key.startsWith("recommendations:") && !key.equals("watch_next"));
+    keys.addAll(recommendationGroups().keySet());
+    keys.add("watch_next");
+    for (String key : keys) refreshRow(key);
   }
 
   private static boolean belongsTo(View view, View parent) {
@@ -3111,13 +3404,13 @@ public class MainActivity extends Activity {
     feeds = null;
     feedsLoaded = 0;
     if (settingsPanel != null && settingsPanel.isShowing()
-        && settingsPanel.isPage("Каналы приложений")) settingsPanel.refresh();
+        && (settingsPanel.isPage("Каналы приложений") || settingsPanel.isPage("Ряды"))) settingsPanel.refresh();
     loadChannels();
   }
 
   void channelsSettings(TvSettingsPanel p) {
     p.title("▤", "Каналы приложений", "Данные системного TV Provider");
-    toggle(p, "▤", "Показывать рекомендации", "show_channels", false);
+    toggle(p, "▤", "Показывать новые группы по умолчанию", "show_channels", false);
     if (!hasTvListingsAccess()) {
       boolean settingsRequired = getPreferences(0).getBoolean("tv_listings_permission_asked", false)
           && !shouldShowRequestPermissionRationale(TV_LISTINGS);
@@ -3146,57 +3439,133 @@ public class MainActivity extends Activity {
             .setMessage((hasTvListingsAccess() ? "Доступ выдан" : "Доступ не выдан")
                 + "\n" + displayed.diagnostics())
             .setPositiveButton("Закрыть", null).show());
-    for (TvFeeds.Channel channel : displayed.channels) {
-      boolean shown = !readIds("hidden_channels").contains(channel.id);
-      p.toggle(
-          "▤",
-          channel.title,
-          channel.source + " · " + channel.programs.size() + " карточек",
-          shown,
-          value -> {
-            List<String> hidden = readIds("hidden_channels");
-            hidden.remove(channel.id);
-            if (!value) hidden.add(channel.id);
-            getPreferences(0)
-                .edit()
-                .putString("hidden_channels", android.text.TextUtils.join("|", hidden))
-                .apply();
-            updateHomeRowVisibility("channel:" + channel.id,
-                value && getPreferences(0).getBoolean("show_channels", false));
-          });
+  }
+
+  private List<LinearLayout> tileGrid(String style, int count, int width, int height, int zoom,
+      int mode, String scrollTag) {
+    int space = focusSpace(width, height, zoom);
+    int screen = (int) (getResources().getDisplayMetrics().widthPixels
+        / getResources().getDisplayMetrics().density);
+    int gap = getPreferences(0).getInt("card_gap", 10);
+    int columns = Math.max(1, (screen - getPreferences(0).getInt("margin_left", 28)
+        - getPreferences(0).getInt("margin_right", 28) - 2 * space) / (width + gap));
+    int rows = Math.min(Appearance.clamp(rowValue(style, "grid_rows", 3), 1, 8),
+        Math.max(1, (count + columns - 1) / columns));
+    int lineHeight = height + (mode == 2 ? 24 : 0) + 2 * space;
+    HorizontalScrollView scroll = new HorizontalScrollView(this);
+    scroll.setTag(scrollTag);
+    scroll.setClipToPadding(false);
+    scroll.setHorizontalScrollBarEnabled(false);
+    scroll.setOnScrollChangeListener((v, x, y, oldX, oldY) -> scheduleArtworkScan());
+    content.addView(scroll, lp(-1, lineHeight * rows));
+    appRows.add(scroll);
+    if (focusedAppRow != null)
+      scroll.setAlpha(getPreferences(0).getInt("inactive_opacity", 75) / 100f);
+    LinearLayout grid = vertical();
+    grid.setClipChildren(false);
+    scroll.addView(grid);
+    List<LinearLayout> lanes = new ArrayList<>();
+    for (int i = 0; i < rows; i++) {
+      LinearLayout lane = horizontal();
+      lane.setClipChildren(false);
+      lane.setClipToPadding(false);
+      lane.setPadding(dp(space), dp(space), dp(space), dp(space));
+      grid.addView(lane, lp(-2, lineHeight));
+      lanes.add(lane);
+    }
+    List<LinearLayout> placements = new ArrayList<>();
+    for (int i = 0; i < count; i++) placements.add(lanes.get((i / columns) % rows));
+    return placements;
+  }
+
+  private void focusTileRow(View card) {
+    for (ViewParent parent = card.getParent(); parent instanceof View; parent = parent.getParent()) {
+      if (parent instanceof HorizontalScrollView) {
+        focusAppRow((View) parent);
+        return;
+      }
     }
   }
 
-  private void renderChannel(TvFeeds.Channel channel) {
+  private void renderInputs() {
+    if (!getPreferences(0).getBoolean("show_inputs", false)) return;
+    List<android.media.tv.TvInputInfo> inputs = availableTvInputs();
+    if (inputs.isEmpty()) return;
+    String style = "inputs";
+    int width = cardWidth(style);
+    int height = Appearance.tileHeight(width, rowValue(style, "card_ratio", 0));
+    int zoom = rowValue(style, "zoom_dp", 6), mode = titleMode(style);
+    rowTitle("⇥", "Источники сигнала");
+    List<LinearLayout> lanes = tileGrid(style, inputs.size(), width, height, zoom, mode, style);
+    for (int i = 0; i < inputs.size(); i++) {
+      android.media.tv.TvInputInfo input = inputs.get(i);
+      CharSequence custom = input.loadCustomLabel(this);
+      String name = (custom == null ? input.loadLabel(this) : custom).toString();
+      AppCardView card = new AppCardView(this, cardRadius(style, width, height),
+          rowValue(style, "card_color", 0xdd222c40));
+      card.setTag(style + ":" + input.getId());
+      card.setContentDescription(name);
+      Drawable icon = input.loadIcon(this);
+      card.addArtwork(icon == null ? getDrawable(R.drawable.nova_ui_input) : icon,
+          height - (mode == 1 ? 24 : 0), false);
+      addCard(lanes.get(i), card, width, height, mode, name, style);
+      card.setOnFocusChangeListener((v, focused) -> {
+        card.showFocus(focused, 1f + (float) zoom / width, accent());
+        if (focused) focusTileRow(card);
+      });
+      card.setOnClickListener(v -> {
+        if (!tryStart(tvInputIntent(input))) {
+          Toast.makeText(this, "Выберите вход в меню «Источники» телевизора", Toast.LENGTH_LONG).show();
+        }
+      });
+    }
+  }
+
+  private void renderChannel(TvFeeds.Channel channel, String style) {
+    int width = cardWidth(style);
+    int ratio = rowValue(style, "card_ratio", 0);
+    int height = Appearance.tileHeight(width, ratio);
+    int zoom = rowValue(style, "zoom_dp", 6), mode = titleMode(style);
     rowTitle("▤", channel.title);
-    HorizontalScrollView scroll = new HorizontalScrollView(this);
-    scroll.setHorizontalScrollBarEnabled(false);
-    scroll.setOnScrollChangeListener(
-        (View v, int x, int y, int oldX, int oldY) -> scheduleArtworkScan());
-    content.addView(scroll, lp(-1, 142));
-    LinearLayout row = horizontal();
-    row.setPadding(dp(6), dp(6), dp(6), dp(6));
-    scroll.addView(row);
-    for (TvFeeds.Program program : channel.programs) {
-      LinearLayout card = vertical();
-      card.setPadding(dp(4), dp(4), dp(4), dp(4));
-      card.setFocusable(true);
-      GradientDrawable normal = shape(0xdd222c40, 10);
-      GradientDrawable selected = shape(0xdd222c40, 10);
-      selected.setStroke(dp(2), accent());
-      StateListDrawable background = new StateListDrawable();
-      background.addState(new int[] {android.R.attr.state_focused}, selected);
-      background.addState(new int[0], normal);
-      card.setBackground(background);
-      marginAdd(row, card, 108, 128, 10);
+    List<LinearLayout> lanes = tileGrid(style, channel.programs.size(), width, height, zoom, mode, channel.id);
+    LinearLayout details = vertical();
+    TextView heading = label("", 20, WHITE);
+    TextView facts = label("", 15, WHITE);
+    TextView description = label("", 15, WHITE);
+    description.setMaxLines(3);
+    description.setEllipsize(android.text.TextUtils.TruncateAt.END);
+    details.addView(heading);
+    details.addView(facts);
+    details.addView(description);
+    details.setVisibility(View.GONE);
+    content.addView(details, lp(-1, -2));
+    for (int i = 0; i < channel.programs.size(); i++) {
+      TvFeeds.Program program = channel.programs.get(i);
+      String name = program.title == null ? "Без названия" : program.title;
+      AppCardView card = new AppCardView(this, cardRadius(style, width, height),
+          rowValue(style, "card_color", 0xdd222c40));
+      card.setTag("program:" + channel.id + ":" + program.intent);
+      card.setContentDescription(name);
       ImageView art = new ImageView(this);
-      art.setImageDrawable(getDrawable(R.mipmap.ic_launcher));
-      art.setScaleType(ImageView.ScaleType.CENTER_CROP);
-      card.addView(art, lp(-1, 96));
-      TextView title = label(program.title == null ? "Без названия" : program.title, 13, WHITE);
-      title.setSingleLine(true);
-      title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-      card.addView(title, lp(-1, 24));
+      art.setImageResource(R.mipmap.ic_launcher);
+      art.setScaleType(ratio == 3 ? ImageView.ScaleType.FIT_CENTER : ImageView.ScaleType.CENTER_CROP);
+      card.contents.addView(art, lp(-1, height - (mode == 1 ? 24 : 0)));
+      addCard(lanes.get(i), card, width, height, mode, name, style);
+      card.setOnFocusChangeListener((v, focused) -> {
+        card.showFocus(focused, 1f + (float) zoom / width, accent());
+        if (focused) {
+          focusTileRow(card);
+          heading.setText(name);
+          facts.setText(program.facts);
+          facts.setVisibility(program.facts.isEmpty() ? View.GONE : View.VISIBLE);
+          description.setText(program.description);
+          description.setVisibility(program.description.isEmpty() ? View.GONE : View.VISIBLE);
+          details.setTag(card);
+          details.setVisibility(View.VISIBLE);
+        } else if (details.getTag() == card) {
+          details.setVisibility(View.GONE);
+        }
+      });
       card.setOnClickListener(v -> openProgram(program));
       loadArtwork(program.artwork, art);
     }
@@ -3454,6 +3823,18 @@ public class MainActivity extends Activity {
         value -> setRowVisibility("hidden_categories", category, value));
     p.action("▦", "Приложения в категории", "Выбор приложений", () -> assignCategoryApps(category));
     p.action("↕", "Порядок, название и удаление", "", () -> categoryActions(category));
+    rowAppearance(p, "category:" + category);
+    p.action("category.manage", "folder", "Управление " + category, "",
+        () -> p.open(page -> {
+          page.title("folder", "Управление " + category, "");
+          for (App app : installed)
+            if (category.equals(getPreferences(0).getString("category_" + app.pkg, "")))
+              page.action(app.pkg, "▤", app.label, "Убрать из категории", () -> {
+                getPreferences(0).edit().remove("category_" + app.pkg).apply();
+                refreshRow("category:" + category);
+                page.refresh();
+              });
+        }));
   }
 
   void createCategory() {
@@ -3484,7 +3865,7 @@ public class MainActivity extends Activity {
                           .putString("categories", android.text.TextUtils.join("|", categories))
                           .apply();
                       dialog.dismiss();
-                      home();
+                      refreshRow("category:" + value);
                       settingsPanel.refresh();
                     }));
     dialog.show();
@@ -3505,13 +3886,18 @@ public class MainActivity extends Activity {
             "Сохранить",
             (d, n) -> {
               android.content.SharedPreferences.Editor edit = getPreferences(0).edit();
+              Set<String> changed = new LinkedHashSet<>();
+              changed.add(category);
               for (int i = 0; i < selected.length; i++) {
                 String key = "category_" + installed.get(i).pkg;
-                if (selected[i]) edit.putString(key, category);
-                else if (category.equals(getPreferences(0).getString(key, ""))) edit.remove(key);
+                String previous = getPreferences(0).getString(key, "");
+                if (selected[i]) {
+                  edit.putString(key, category);
+                  if (!previous.isEmpty()) changed.add(previous);
+                } else if (category.equals(previous)) edit.remove(key);
               }
               edit.apply();
-              home();
+              for (String name : changed) refreshRow("category:" + name);
             })
         .setNegativeButton("Отмена", null)
         .show();
@@ -3545,7 +3931,7 @@ public class MainActivity extends Activity {
                     .edit()
                     .putString("categories", android.text.TextUtils.join("|", categories))
                     .apply();
-                rebuildLauncherRows();
+                reorderHomeRows(rowOrder);
                 if (settingsPanel != null && settingsPanel.isShowing()) settingsPanel.refresh();
               } else if (n == 2) {
                 EditText input = new EditText(this);
@@ -3592,9 +3978,26 @@ public class MainActivity extends Activity {
                                         && !key.startsWith("category_order_")
                                         && category.equals(getPreferences(0).getString(key, "")))
                                       edit.putString(key, name);
+                                  if (!name.equals(category)) {
+                                    for (Map.Entry<String, ?> entry : getPreferences(0).getAll().entrySet()) {
+                                      String prefix = "row:category:" + category + ":";
+                                      if (entry.getKey().startsWith(prefix) && entry.getValue() instanceof Integer) {
+                                        edit.putInt("row:category:" + name + ":" + entry.getKey().substring(prefix.length()),
+                                            (Integer) entry.getValue()).remove(entry.getKey());
+                                      }
+                                    }
+                                    List<String> hidden = readIds("hidden_categories");
+                                    if (Collections.replaceAll(hidden, category, name))
+                                      edit.putString("hidden_categories", android.text.TextUtils.join("|", hidden));
+                                  }
                                   edit.apply();
                                   dialog.dismiss();
-                                  home();
+                                  refreshRow("category:" + category);
+                                  if (!name.equals(category)) refreshRow("category:" + name);
+                                  if (settingsPanel != null && settingsPanel.isShowing()) {
+                                    settingsPanel.onBackPressed();
+                                    settingsPanel.refresh();
+                                  }
                                 }));
                 dialog.show();
               } else
@@ -3620,7 +4023,11 @@ public class MainActivity extends Activity {
                                 && category.equals(getPreferences(0).getString(key, "")))
                               edit.remove(key);
                           edit.apply();
-                          home();
+                          refreshRow("category:" + category);
+                          if (settingsPanel != null && settingsPanel.isShowing()) {
+                            settingsPanel.onBackPressed();
+                            settingsPanel.refresh();
+                          }
                         })
                     .setNegativeButton("Отмена", null)
                     .show();
@@ -3641,11 +4048,12 @@ public class MainActivity extends Activity {
         .setItems(
             categories.toArray(new String[0]),
             (d, n) -> {
-              getPreferences(0)
-                  .edit()
-                  .putString("category_" + app.pkg, n == 0 ? "" : categories.get(n))
-                  .apply();
-              home();
+              String key = "category_" + app.pkg;
+              String before = getPreferences(0).getString(key, "");
+              String after = n == 0 ? "" : categories.get(n);
+              getPreferences(0).edit().putString(key, after).apply();
+              if (!before.isEmpty()) refreshRow("category:" + before);
+              if (!after.isEmpty() && !after.equals(before)) refreshRow("category:" + after);
             })
         .setNegativeButton("Отмена", null)
         .show();
@@ -3705,7 +4113,7 @@ public class MainActivity extends Activity {
     getPreferences(0).edit().putString("weather_city", city).putString("weather_lat", latitude)
         .putString("weather_lon", longitude).remove("weather_temperature")
         .remove("weather_cache").remove("weather_error").remove("weather_time").apply();
-    if (weather != null) setChangedText(weather, "—");
+    if (weather != null && buttonMode("weather") != 0) setChangedText(weather, "—");
     loadWeather();
     if (settingsPanel != null && settingsPanel.isShowing() && settingsPanel.isPage("Погода"))
       settingsPanel.refresh();
@@ -3842,7 +4250,7 @@ public class MainActivity extends Activity {
   }
 
   void loadWeather() {
-    if (!resumed || weather == null || statusBar.getVisibility() != View.VISIBLE
+    if (!resumed || weather == null
         || SystemClock.elapsedRealtime() < retryWeatherAfter) return;
     String city = getPreferences(0).getString("weather_city", "");
     if (!weatherRequests.shouldLoad(
@@ -3895,7 +4303,7 @@ public class MainActivity extends Activity {
                       .putString("weather_temperature", text)
                       .putLong("weather_time", System.currentTimeMillis())
                       .apply();
-                if (weather != null) setChangedText(weather, cachedWeather());
+                if (weather != null && buttonMode("weather") != 0) setChangedText(weather, cachedWeather());
                 if (settingsPanel != null && settingsPanel.isShowing()
                     && settingsPanel.isPage("Погода")) settingsPanel.refresh();
               });
