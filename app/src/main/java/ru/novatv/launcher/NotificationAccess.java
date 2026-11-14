@@ -10,13 +10,17 @@ public class NotificationAccess extends NotificationListenerService {
   static final class Item {
     final String title, text, pkg;
     final boolean ongoing, groupSummary;
+    final long postTime;
+    final android.app.PendingIntent contentIntent;
 
-    Item(String title, String text, String pkg, boolean ongoing, boolean groupSummary) {
+    Item(String title, String text, String pkg, boolean ongoing, boolean groupSummary, long postTime, android.app.PendingIntent contentIntent) {
       this.title = title;
       this.text = text;
       this.pkg = pkg;
       this.ongoing = ongoing;
       this.groupSummary = groupSummary;
+      this.postTime = postTime;
+      this.contentIntent = contentIntent;
     }
   }
 
@@ -51,7 +55,7 @@ public class NotificationAccess extends NotificationListenerService {
     if ("ContentTitle".equalsIgnoreCase(title)) title = "";
     synchronized (NotificationAccess.class) {
       items.put(item.getKey(), new Item(title, text, item.getPackageName(), item.isOngoing(),
-          (notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0));
+          (notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0, item.getPostTime(), notification.contentIntent));
     }
   }
 

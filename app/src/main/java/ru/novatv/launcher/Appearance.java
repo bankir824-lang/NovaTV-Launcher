@@ -7,9 +7,13 @@ final class Appearance {
   }
 
   static int cardHeight(int width, int ratio, boolean title) {
-    int safe = clamp(width, 80, 240);
-    int image = ratio == 1 ? safe : ratio == 2 ? safe * 3 / 4 : safe * 9 / 16;
+    int safe = clamp(width, 60, 240);
+    int image = ratio == 3 ? safe * 3 / 2 : ratio == 1 ? safe : ratio == 2 ? safe * 3 / 4 : safe * 9 / 16;
     return image + (title ? 24 : 0) + 8;
+  }
+
+  static int tileHeight(int width, int ratio) {
+    return cardHeight(width, ratio, false) - 8;
   }
 
   static int neighbor(int index, int count, int columns, int rows, int dx, int dy) {

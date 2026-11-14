@@ -6,6 +6,9 @@
     <uses-feature android:name="android.software.leanback" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <queries>
+        <intent><action android:name="android.speech.action.WEB_SEARCH" /></intent>
+        <intent><action android:name="android.speech.action.VOICE_SEARCH_HANDS_FREE" /></intent>
+        <intent><action android:name="android.settings.VOICE_INPUT_SETTINGS" /></intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />

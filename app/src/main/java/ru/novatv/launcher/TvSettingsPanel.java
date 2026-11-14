@@ -177,6 +177,8 @@ final class TvSettingsPanel extends Dialog {
     saveOrder = null;
     accent = host.accent();
     if (pageScroll == null) createPanel();
+    body.animate().cancel();
+    body.setTranslationX(0);
     heading.removeAllViews();
     body.removeAllViews();
     currentTitle = "";
@@ -222,11 +224,20 @@ final class TvSettingsPanel extends Dialog {
   }
 
   void title(String icon, String title, String subtitle) {
+    title(null, icon, title, subtitle);
+  }
+
+  void title(android.graphics.drawable.Drawable artwork, String icon, String title, String subtitle) {
     currentTitle = title;
     if (pages.size() > 1) heading.addView(host.label("Настройки", 13, accent));
     LinearLayout titleRow = host.horizontal();
     titleRow.setGravity(Gravity.CENTER_VERTICAL);
-    titleRow.addView(badge(icon), host.lp(32, 32));
+    if (artwork == null) titleRow.addView(badge(icon), host.lp(32, 32));
+    else {
+      ImageView image = new ImageView(host);
+      image.setImageDrawable(artwork);
+      titleRow.addView(image, host.lp(32, 32));
+    }
     TextView caption = host.label(title, 24, NovaUi.TEXT);
     caption.setTypeface(null, android.graphics.Typeface.BOLD);
     caption.setPadding(host.dp(8), 0, 0, 0);
@@ -312,6 +323,7 @@ final class TvSettingsPanel extends Dialog {
   private int iconFor(String icon) {
     switch (icon) {
       case "♧": return R.drawable.nova_bell;
+      case "ᛒ": return R.drawable.nova_bluetooth;
       case "◷": return R.drawable.nova_clock;
       case "☾": return R.drawable.nova_ui_moon;
       case "display": return R.drawable.nova_ui_tv;
@@ -465,11 +477,12 @@ final class TvSettingsPanel extends Dialog {
     row.setTag(key);
     replaceBadge(row, icon);
     row.setOnClickListener(v -> click.run());
-    row.setOnLongClickListener(
-        v -> {
-          longClick.run();
-          return true;
-        });
+    if (longClick != null) {
+      row.setOnLongClickListener(v -> {
+        longClick.run();
+        return true;
+      });
+    }
     RemoteOkHandler.bind(row);
   }
 
@@ -521,12 +534,19 @@ final class TvSettingsPanel extends Dialog {
 
   void slider(
       String icon, String title, int min, int max, int value, String suffix, IntConsumer changed) {
+    slider(icon, title, min, max, value, 1, suffix, changed);
+  }
+
+  void slider(String icon, String title, int min, int max, int value, int step, String suffix,
+      IntConsumer changed) {
+    int initial = min + Math.max(0, Math.min((max - min) / step,
+        Math.round((float) (value - min) / step))) * step;
     LinearLayout container = host.vertical();
     container.setPadding(host.dp(12), host.dp(8), host.dp(12), host.dp(8));
     LinearLayout labelRow = host.horizontal();
     labelRow.setGravity(Gravity.CENTER_VERTICAL);
     labelRow.addView(badge(icon), host.lp(28, 28));
-    TextView text = host.label(title + " · " + value + suffix, 15, NovaUi.TEXT);
+    TextView text = host.label(title + " · " + initial + suffix, 15, NovaUi.TEXT);
     text.setPadding(host.dp(8), 0, 0, 0);
     labelRow.addView(text);
     container.addView(labelRow);
@@ -534,8 +554,8 @@ final class TvSettingsPanel extends Dialog {
     seek.setTag("slider:" + title);
     seek.setFocusable(true);
     seek.setFocusableInTouchMode(true);
-    seek.setMax(max - min);
-    seek.setProgress(Math.max(0, Math.min(max - min, value - min)));
+    seek.setMax((max - min) / step);
+    seek.setProgress((initial - min) / step);
     seek.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));
     seek.setThumbTintList(android.content.res.ColorStateList.valueOf(accent));
     container.addView(seek, host.lp(-1, 34));
@@ -557,7 +577,7 @@ final class TvSettingsPanel extends Dialog {
     seek.setOnSeekBarChangeListener(
         new SeekBar.OnSeekBarChangeListener() {
           public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-            int actual = progress + min;
+            int actual = progress * step + min;
             text.setText(title + " · " + actual + suffix);
             changed.accept(actual);
           }
@@ -569,4 +589,78 @@ final class TvSettingsPanel extends Dialog {
     body.addView(container, host.lp(-1, -2));
     if (first == null) first = seek;
   }
+
+  void palette(String title, int current, int fallback, IntConsumer save) {
+    title("◐", title, "");
+    int[] base = {
+        0xffed493e, 0xffff961c, 0xffffd22c, 0xff88c940, 0xff20c299,
+        0xff28a8e0, 0xff4d67e3, 0xff854bd7, 0xffde53ac, 0xffaaaaaa
+    };
+    float[] hsv = new float[3];
+    android.graphics.Color.colorToHSV(current, hsv);
+    float[] selected = hsv.clone();
+    int[] opacity = {android.graphics.Color.alpha(current)};
+    int[] brightness = {50};
+    int[] result = {current};
+    View sample = new View(host);
+    Runnable preview = () -> {
+      float[] color = selected.clone();
+      float adjustment = (brightness[0] - 50) / 50f;
+      color[2] = adjustment >= 0 ? color[2] + (1f - color[2]) * adjustment
+          : color[2] * (1f + adjustment);
+      result[0] = android.graphics.Color.HSVToColor(opacity[0], color);
+      sample.setBackground(host.shape(result[0], 8));
+    };
+    for (int shade = 0; shade < 6; shade++) {
+      LinearLayout line = host.horizontal();
+      for (int column = 0; column < base.length; column++) {
+        float[] chip = new float[3];
+        android.graphics.Color.colorToHSV(base[column], chip);
+        chip[1] *= shade < 3 ? .28f + shade * .24f : 1f;
+        chip[2] *= shade < 3 ? 1f : 1f - (shade - 3) * .22f;
+        int color = android.graphics.Color.HSVToColor(chip);
+        View swatch = new View(host);
+        swatch.setFocusable(true);
+        swatch.setTag("palette:" + shade + ":" + column);
+        swatch.setContentDescription(String.format(java.util.Locale.ROOT, "Цвет #%06X", color & 0xffffff));
+        LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, host.dp(30), 1f);
+        size.setMargins(host.dp(2), host.dp(2), host.dp(2), host.dp(2));
+        line.addView(swatch, size);
+        swatch.setBackground(host.shape(color, 7));
+        swatch.setOnFocusChangeListener((view, focused) -> {
+          android.graphics.drawable.GradientDrawable border = host.shape(color, 7);
+          if (focused) border.setStroke(host.dp(3), android.graphics.Color.WHITE);
+          view.setBackground(border);
+        });
+        swatch.setOnClickListener(v -> {
+          System.arraycopy(chip, 0, selected, 0, 3);
+          preview.run();
+        });
+        if (first == null) first = swatch;
+      }
+      body.addView(line, host.lp(-1, 34));
+    }
+    body.addView(sample, host.lp(-1, 34));
+    preview.run();
+    slider("◐", "Яркость", 0, 100, brightness[0], " %", value -> {
+      brightness[0] = value;
+      preview.run();
+    });
+    slider("◐", "Непрозрачность", 0, 100, Math.round(opacity[0] * 100f / 255), " %", value -> {
+      opacity[0] = Math.round(255f * value / 100);
+      preview.run();
+    });
+    action("palette.default", "↻", "По умолчанию", "", () -> {
+      save.accept(fallback);
+      onBackPressed();
+    });
+    action("palette.cancel", "×", "Отмена", "", this::onBackPressed);
+    action("palette.ok", "✓", "OK", "", () -> {
+      save.accept(result[0]);
+      onBackPressed();
+    });
+    body.setTranslationX(body.getWidth() > 0 ? body.getWidth() : host.dp(180));
+    body.animate().translationX(0).setDuration(160).start();
+  }
+
 }
